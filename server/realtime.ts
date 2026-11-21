@@ -1,17 +1,33 @@
 import crypto from 'node:crypto';
 import type http from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { GUESS_PRESETS } from '../src/game/catalog.ts';
+import {
+  applyChessMove,
+  chooseChessAiMove,
+  createInitialChessState,
+  getLegalChessMoves,
+  type PromoKind,
+} from '../src/game/chessEngine.ts';
+import {
+  C4_COLS,
+  chooseC4AiMove,
+  createC4Board,
+  evaluateC4Board,
+  getC4DropRow,
+  type C4Cell,
+} from '../src/game/connectFour.ts';
+import { GUESS_PRESETS, MULTIPLAYER_GAME_IDS } from '../src/game/catalog.ts';
 import { normalizeTttConfig } from '../src/game/tttRules.ts';
 import type {
   DifficultyLevel,
-  GameId,
+  MultiplayerGameId,
   OnlinePlayerSummary,
   PublicRoomSummary,
+  RoomChatMessage,
   RoomSeat,
   RoomState,
 } from '../src/types.ts';
-import { db, type DbPlayer, recordMatchAndProgress, sha256 } from './db.ts';
+import { createNotification, db, type DbPlayer, recordMatchAndProgress, sha256 } from './db.ts';
 import {
   chooseRpsAiMove,
   chooseTttAiMove,
@@ -29,7 +45,7 @@ interface ConnectedClient {
   activeFrame: string;
   level: number;
   roomId: string | null;
-  queuedFor: { gameId: GameId; mode: 'vs_human' | 'mixed' } | null;
+  queuedFor: { gameId: MultiplayerGameId; mode: 'vs_human' | 'mixed' } | null;
 }
 
 interface InternalSeat extends RoomSeat {
@@ -42,7 +58,7 @@ interface InternalSeat extends RoomSeat {
 interface InternalRoom {
   id: string;
   code: string;
-  gameId: GameId;
+  gameId: MultiplayerGameId;
   title: string;
   mode: 'vs_human' | 'mixed';
   isPrivate: boolean;
@@ -51,6 +67,7 @@ interface InternalRoom {
   maxSeats: number;
   roundNumber: number;
   seats: InternalSeat[];
+  chatMessages: RoomChatMessage[];
   startedAt: number;
   tttBoardSize: number;
   tttWinTarget: number;
@@ -68,6 +85,8 @@ interface InternalRoom {
     revealedSecret: number | null;
     feed: NonNullable<RoomState['guessState']>['feed'];
   };
+  connectFourState?: RoomState['connectFourState'];
+  chessState?: RoomState['chessState'];
   winnerSummary: string | null;
   aiTimers: Array<ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>>;
 }
@@ -92,7 +111,8 @@ function authenticateWsRequest(req: http.IncomingMessage): DbPlayer | null {
     if (!sess || sess.expires_at <= Date.now()) return null;
 
     const player = db.prepare('SELECT * FROM players WHERE id = ?').get(sess.player_id) as DbPlayer | undefined;
-    return player || null;
+    if (!player || player.banned) return null;
+    return player;
   } catch {
     return null;
   }
@@ -107,11 +127,33 @@ function generateRoomCode(): string {
   return out;
 }
 
+function assignSeatTeam(gameId: MultiplayerGameId, seatIndex: number): RoomSeat['team'] {
+  if (gameId === 'tictactoe') return seatIndex % 2 === 0 ? 'X' : 'O';
+  if (gameId === 'connect_four') return seatIndex % 2 === 0 ? 'R' : 'Y';
+  if (gameId === 'chess') return seatIndex % 2 === 0 ? 'W' : 'B';
+  return undefined;
+}
+
+function gameDisplayName(gameId: MultiplayerGameId): string {
+  switch (gameId) {
+    case 'tictactoe':
+      return 'Tic-Tac-Toe';
+    case 'rps':
+      return 'Rock Paper Scissors';
+    case 'guess_number':
+      return 'Guess the Number';
+    case 'connect_four':
+      return 'Connect Four';
+    case 'chess':
+      return 'Chess';
+  }
+}
+
 export class RealtimeHub {
   private wss: WebSocketServer;
   private clients = new Map<string, ConnectedClient>();
   private rooms = new Map<string, InternalRoom>();
-  private queues = new Map<string, string[]>(); // `${gameId}:${mode}` -> playerId[]
+  private queues = new Map<string, string[]>();
 
   constructor(httpServer: http.Server) {
     this.wss = new WebSocketServer({ server: httpServer, path: '/ws' });
@@ -197,6 +239,20 @@ export class RealtimeHub {
     this.broadcastAll('rooms:list', { rooms: this.getPublicRoomSummaries(false) });
   }
 
+  private pushSystemChat(room: InternalRoom, text: string) {
+    room.chatMessages.push({
+      id: crypto.randomUUID(),
+      senderId: 'system',
+      username: 'PLAYNOVA Arena',
+      kind: 'system',
+      text,
+      ts: Date.now(),
+    });
+    if (room.chatMessages.length > 60) {
+      room.chatMessages = room.chatMessages.slice(-60);
+    }
+  }
+
   private serializeRoom(room: InternalRoom): RoomState {
     return {
       id: room.id,
@@ -231,6 +287,7 @@ export class RealtimeHub {
         lastProximity: s.lastProximity,
         crackedAtMs: s.crackedAtMs,
       })),
+      chatMessages: room.chatMessages,
       tttState: room.tttState,
       rpsState: room.rpsState,
       guessState: room.guessState
@@ -245,6 +302,8 @@ export class RealtimeHub {
             feed: room.guessState.feed,
           }
         : undefined,
+      connectFourState: room.connectFourState,
+      chessState: room.chessState,
       winnerSummary: room.winnerSummary,
     };
   }
@@ -281,7 +340,6 @@ export class RealtimeHub {
       existing.ws.close(4000, 'Replaced by newer connection');
     }
 
-    // Check if player had an active seat reserved while reconnecting
     let rejoinedRoom: InternalRoom | null = null;
     for (const room of this.rooms.values()) {
       const seat = room.seats.find((s) => s.kind === 'human' && s.playerId === player.id);
@@ -371,7 +429,7 @@ export class RealtimeHub {
     if (client) client.queuedFor = null;
   }
 
-  private makeHumanSeat(client: ConnectedClient, seatIndex: number, team?: 'X' | 'O'): InternalSeat {
+  private makeHumanSeat(client: ConnectedClient, seatIndex: number, team?: RoomSeat['team']): InternalSeat {
     return {
       seatIndex,
       kind: 'human',
@@ -389,20 +447,20 @@ export class RealtimeHub {
     };
   }
 
-  private makeAiSeat(seatIndex: number, difficulty: DifficultyLevel, team?: 'X' | 'O'): InternalSeat {
+  private makeAiSeat(seatIndex: number, difficulty: DifficultyLevel, team?: RoomSeat['team']): InternalSeat {
     const label =
       difficulty === 'hard'
-        ? `Apex AI #${seatIndex + 1}`
+        ? `Apex AI Bot #${seatIndex + 1}`
         : difficulty === 'medium'
-        ? `Tactician AI #${seatIndex + 1}`
-        : `Scout AI #${seatIndex + 1}`;
+        ? `Tactician AI Bot #${seatIndex + 1}`
+        : `Scout AI Bot #${seatIndex + 1}`;
     return {
       seatIndex,
       kind: 'ai',
       playerId: null,
       username: label,
       profilePictureUrl: null,
-      activeFrame: difficulty === 'hard' ? 'frame_crimson' : difficulty === 'medium' ? 'frame_amber' : 'frame_slate',
+      activeFrame: difficulty === 'hard' ? 'frame_orange' : difficulty === 'medium' ? 'frame_purple' : 'frame_slate',
       aiDifficulty: difficulty,
       connectionStatus: 'bot',
       team,
@@ -417,7 +475,7 @@ export class RealtimeHub {
   private createRoom(
     host: ConnectedClient,
     opts: {
-      gameId: GameId;
+      gameId: MultiplayerGameId;
       mode: 'vs_human' | 'mixed';
       isPrivate: boolean;
       title?: string;
@@ -439,37 +497,29 @@ export class RealtimeHub {
       code = generateRoomCode();
     }
 
-    const defaultMax = opts.gameId === 'tictactoe' ? (opts.mode === 'mixed' ? 4 : 2) : opts.mode === 'mixed' ? 4 : 2;
-    const maxSeats = Math.max(2, Math.min(4, opts.maxSeats || defaultMax));
-    const seats: InternalSeat[] = [
-      this.makeHumanSeat(host, 0, opts.gameId === 'tictactoe' ? 'X' : undefined),
-    ];
+    const isStrictly1v1 = opts.gameId === 'connect_four' || opts.gameId === 'chess';
+    const defaultMax = isStrictly1v1 ? 2 : opts.mode === 'mixed' ? 4 : 2;
+    const maxSeats = isStrictly1v1 ? 2 : Math.max(2, Math.min(4, opts.maxSeats || defaultMax));
+
+    const seats: InternalSeat[] = [this.makeHumanSeat(host, 0, assignSeatTeam(opts.gameId, 0))];
 
     if (opts.mode === 'mixed' && opts.aiBots && opts.aiBots.length > 0) {
       for (const diff of opts.aiBots) {
         if (seats.length >= maxSeats) break;
         const idx = seats.length;
-        const team: 'X' | 'O' | undefined =
-          opts.gameId === 'tictactoe' ? (idx % 2 === 0 ? 'X' : 'O') : undefined;
-        seats.push(this.makeAiSeat(idx, diff, team));
+        seats.push(this.makeAiSeat(idx, diff, assignSeatTeam(opts.gameId, idx)));
       }
     }
 
     const tttCfg = normalizeTttConfig(opts.tttWinTarget, opts.tttBoardSize);
     const rpsTargetWins = Math.max(1, Math.min(15, Math.floor(Number(opts.rpsTargetWins || 3))));
-
-    const gameLabel =
-      opts.gameId === 'tictactoe'
-        ? 'Tic-Tac-Toe'
-        : opts.gameId === 'rps'
-        ? 'Rock-Paper-Scissors'
-        : 'Guess the Number';
+    const gameLabel = gameDisplayName(opts.gameId);
 
     const room: InternalRoom = {
       id,
       code,
       gameId: opts.gameId,
-      title: (opts.title || `${host.username}'s ${gameLabel} Room`).slice(0, 48),
+      title: (opts.title || `${host.username}'s ${gameLabel} Arena`).slice(0, 48),
       mode: opts.mode,
       isPrivate: Boolean(opts.isPrivate),
       hostPlayerId: host.playerId,
@@ -477,6 +527,7 @@ export class RealtimeHub {
       maxSeats,
       roundNumber: 0,
       seats,
+      chatMessages: [],
       startedAt: Date.now(),
       tttBoardSize: tttCfg.boardSize,
       tttWinTarget: tttCfg.winTarget,
@@ -484,6 +535,7 @@ export class RealtimeHub {
       winnerSummary: null,
       aiTimers: [],
     };
+    this.pushSystemChat(room, `${host.username} opened a ${gameLabel} room (${code}).`);
 
     this.rooms.set(id, room);
     host.roomId = id;
@@ -495,13 +547,15 @@ export class RealtimeHub {
     if (!room) return;
 
     const idx = room.seats.findIndex((s) => s.kind === 'human' && s.playerId === playerId);
+    let leftName = 'Player';
     if (idx !== -1) {
       const removed = room.seats[idx];
+      leftName = removed.username;
       if (removed.disconnectTimer) clearTimeout(removed.disconnectTimer);
       room.seats.splice(idx, 1);
       room.seats.forEach((s, i) => {
         s.seatIndex = i;
-        if (room.gameId === 'tictactoe') s.team = i % 2 === 0 ? 'X' : 'O';
+        s.team = assignSeatTeam(room.gameId, i);
       });
     }
 
@@ -516,6 +570,7 @@ export class RealtimeHub {
       this.clearRoomTimers(room);
       this.rooms.delete(roomId);
     } else {
+      this.pushSystemChat(room, `${leftName} left the arena.`);
       if (room.hostPlayerId === playerId) {
         room.hostPlayerId = remainingHumans[0].playerId!;
       }
@@ -554,10 +609,30 @@ export class RealtimeHub {
         break;
       }
 
+      case 'chat:send': {
+        const room = client.roomId ? this.rooms.get(client.roomId) : undefined;
+        if (!room) return;
+        const text = String(payload.text || '').trim().replace(/\s+/g, ' ').slice(0, 220);
+        if (!text) return;
+        room.chatMessages.push({
+          id: crypto.randomUUID(),
+          senderId: client.playerId,
+          username: client.username,
+          kind: 'human',
+          text,
+          ts: Date.now(),
+        });
+        if (room.chatMessages.length > 60) {
+          room.chatMessages = room.chatMessages.slice(-60);
+        }
+        this.broadcastRoom(room);
+        break;
+      }
+
       case 'queue:join': {
-        const gameId = (['tictactoe', 'rps', 'guess_number'].includes(String(payload.gameId))
+        const gameId = (MULTIPLAYER_GAME_IDS.includes(String(payload.gameId) as MultiplayerGameId)
           ? payload.gameId
-          : 'tictactoe') as GameId;
+          : 'tictactoe') as MultiplayerGameId;
         const mode = payload.mode === 'mixed' ? 'mixed' : 'vs_human';
 
         if (client.roomId) {
@@ -567,7 +642,6 @@ export class RealtimeHub {
 
         const qKey = `${gameId}:${mode}`;
         const list = this.queues.get(qKey) || [];
-        // Look for an already waiting human in this queue
         const partnerId = list.find((id) => id !== client.playerId && this.clients.has(id));
         if (partnerId) {
           this.queues.set(
@@ -578,20 +652,20 @@ export class RealtimeHub {
           partner.queuedFor = null;
           client.queuedFor = null;
 
+          const is1v1 = gameId === 'connect_four' || gameId === 'chess';
           const room = this.createRoom(partner, {
             gameId,
-            mode,
+            mode: is1v1 ? 'vs_human' : mode,
             isPrivate: false,
-            title: mode === 'mixed' ? 'Mixed Matchmaking Arena' : 'Ranked 1v1 Match',
-            maxSeats: mode === 'mixed' ? 4 : 2,
-            aiBots: mode === 'mixed' ? ['medium', 'hard'] : undefined,
+            title: mode === 'mixed' && !is1v1 ? 'Mixed Matchmaking Arena' : `Ranked 1v1 ${gameDisplayName(gameId)}`,
+            maxSeats: is1v1 ? 2 : mode === 'mixed' ? 4 : 2,
+            aiBots: mode === 'mixed' && !is1v1 ? ['medium', 'hard'] : undefined,
           });
           const seatIdx = room.seats.length;
-          const team: 'X' | 'O' | undefined =
-            gameId === 'tictactoe' ? (seatIdx % 2 === 0 ? 'X' : 'O') : undefined;
-          room.seats.push(this.makeHumanSeat(client, seatIdx, team));
+          room.seats.push(this.makeHumanSeat(client, seatIdx, assignSeatTeam(gameId, seatIdx)));
           client.roomId = room.id;
 
+          this.pushSystemChat(room, `Random Matchmaking paired ${partner.username} and ${client.username}!`);
           this.startMatch(room);
           this.broadcastPresenceAndRooms();
           return;
@@ -613,15 +687,16 @@ export class RealtimeHub {
       }
 
       case 'room:create': {
-        const gameId = (['tictactoe', 'rps', 'guess_number'].includes(String(payload.gameId))
+        const gameId = (MULTIPLAYER_GAME_IDS.includes(String(payload.gameId) as MultiplayerGameId)
           ? payload.gameId
-          : 'tictactoe') as GameId;
+          : 'tictactoe') as MultiplayerGameId;
         const mode = payload.mode === 'mixed' ? 'mixed' : 'vs_human';
         const isPrivate = Boolean(payload.isPrivate);
         const aiDiff = (['easy', 'medium', 'hard'].includes(String(payload.aiDifficulty))
           ? payload.aiDifficulty
           : 'medium') as DifficultyLevel;
-        const aiCount = mode === 'mixed' ? Math.max(1, Math.min(3, Number(payload.aiCount || 1))) : 0;
+        const maxBots = gameId === 'connect_four' || gameId === 'chess' ? 1 : 3;
+        const aiCount = mode === 'mixed' ? Math.max(1, Math.min(maxBots, Number(payload.aiCount || 1))) : 0;
         const aiBots = Array.from({ length: aiCount }, (_, idx) =>
           idx === 1 && aiDiff !== 'hard' ? 'hard' : aiDiff
         ) as DifficultyLevel[];
@@ -682,13 +757,13 @@ export class RealtimeHub {
           return;
         }
         if (target.seats.length >= target.maxSeats) {
-          // In mixed rooms, replace an AI bot seat if room is full of bots so humans can join!
           const aiIdx = target.seats.findIndex((s) => s.kind === 'ai');
           if (target.mode === 'mixed' && aiIdx !== -1) {
             const team = target.seats[aiIdx].team;
             target.seats.splice(aiIdx, 1);
             target.seats.forEach((s, i) => {
               s.seatIndex = i;
+              s.team = assignSeatTeam(target.gameId, i);
             });
             target.seats.push(this.makeHumanSeat(client, target.seats.length, team));
           } else {
@@ -701,12 +776,11 @@ export class RealtimeHub {
           }
           this.removeFromQueue(client.playerId);
           const idx = target.seats.length;
-          const team: 'X' | 'O' | undefined =
-            target.gameId === 'tictactoe' ? (idx % 2 === 0 ? 'X' : 'O') : undefined;
-          target.seats.push(this.makeHumanSeat(client, idx, team));
+          target.seats.push(this.makeHumanSeat(client, idx, assignSeatTeam(target.gameId, idx)));
         }
 
         client.roomId = target.id;
+        this.pushSystemChat(target, `${client.username} joined the room.`);
         this.broadcastRoom(target);
         this.broadcastPresenceAndRooms();
         break;
@@ -731,8 +805,9 @@ export class RealtimeHub {
           : 'medium') as DifficultyLevel;
         room.mode = 'mixed';
         const idx = room.seats.length;
-        const team: 'X' | 'O' | undefined = room.gameId === 'tictactoe' ? (idx % 2 === 0 ? 'X' : 'O') : undefined;
-        room.seats.push(this.makeAiSeat(idx, diff, team));
+        const aiSeat = this.makeAiSeat(idx, diff, assignSeatTeam(room.gameId, idx));
+        room.seats.push(aiSeat);
+        this.pushSystemChat(room, `Added AI Bot (${aiSeat.username}).`);
         this.broadcastRoom(room);
         this.broadcastPresenceAndRooms();
         break;
@@ -747,7 +822,7 @@ export class RealtimeHub {
         room.seats.splice(seatIndex, 1);
         room.seats.forEach((s, i) => {
           s.seatIndex = i;
-          if (room.gameId === 'tictactoe') s.team = i % 2 === 0 ? 'X' : 'O';
+          s.team = assignSeatTeam(room.gameId, i);
         });
         if (room.seats.every((s) => s.kind === 'human')) {
           room.mode = 'vs_human';
@@ -774,6 +849,12 @@ export class RealtimeHub {
           fromUsername: client.username,
           createdAt: new Date().toISOString(),
         });
+        createNotification(
+          targetId,
+          'Match Invitation',
+          `${client.username} invited you to join ${gameDisplayName(room.gameId)} (Room ${room.code}).`,
+          'invite'
+        );
         this.send(client.ws, 'invite:sent', { toUsername: target.username });
         break;
       }
@@ -784,18 +865,12 @@ export class RealtimeHub {
         if (!room || room.hostPlayerId !== client.playerId) return;
         if (room.seats.length < 2) {
           this.send(client.ws, 'room:error', {
-            error: 'Need at least 2 participants (invite a human player or add an AI bot for a Mixed Match).',
+            error: 'Need at least 2 participants (invite an online player or add an AI bot).',
           });
           return;
         }
-        if (room.gameId === 'tictactoe') {
-          const hasX = room.seats.some((s) => s.team === 'X');
-          const hasO = room.seats.some((s) => s.team === 'O');
-          if (!hasX || !hasO) {
-            room.seats.forEach((s, idx) => {
-              s.team = idx % 2 === 0 ? 'X' : 'O';
-            });
-          }
+        if (event === 'room:rematch') {
+          this.pushSystemChat(room, `${client.username} initiated a rematch!`);
         }
         this.startMatch(room);
         this.broadcastPresenceAndRooms();
@@ -810,8 +885,7 @@ export class RealtimeHub {
           this.send(client.ws, 'room:error', { error: 'Wait for your turn.' });
           return;
         }
-        const cellIndex = Number(payload.cellIndex);
-        this.applyTttMove(room, cellIndex);
+        this.applyTttMove(room, Number(payload.cellIndex));
         break;
       }
 
@@ -827,8 +901,7 @@ export class RealtimeHub {
         seat.hasPicked = true;
         this.broadcastRoom(room);
 
-        const allHumansPicked = room.seats.filter((s) => s.kind === 'human').every((s) => s.hasPicked);
-        if (allHumansPicked) {
+        if (room.seats.filter((s) => s.kind === 'human').every((s) => s.hasPicked)) {
           this.resolveRpsRound(room);
         }
         break;
@@ -840,7 +913,7 @@ export class RealtimeHub {
         const seat = room.seats.find((s) => s.kind === 'human' && s.playerId === client.playerId);
         if (!seat) return;
         if ((seat.guessCount || 0) >= room.guessState.maxAttempts) {
-          this.send(client.ws, 'room:error', { error: 'You have used all your attempts this round.' });
+          this.send(client.ws, 'room:error', { error: 'You have used all attempts this round.' });
           return;
         }
         const guess = Number(payload.guess);
@@ -851,6 +924,41 @@ export class RealtimeHub {
           return;
         }
         this.applyGuessAttempt(room, seat, guess);
+        break;
+      }
+
+      case 'c4:drop': {
+        const room = client.roomId ? this.rooms.get(client.roomId) : undefined;
+        if (!room || room.gameId !== 'connect_four' || room.status !== 'active' || !room.connectFourState) return;
+        const activeSeat = room.seats[room.connectFourState.activeSeatIndex];
+        if (!activeSeat || activeSeat.kind !== 'human' || activeSeat.playerId !== client.playerId) {
+          this.send(client.ws, 'room:error', { error: 'Wait for your turn.' });
+          return;
+        }
+        this.applyC4Move(room, Number(payload.col));
+        break;
+      }
+
+      case 'chess:move': {
+        const room = client.roomId ? this.rooms.get(client.roomId) : undefined;
+        if (!room || room.gameId !== 'chess' || room.status !== 'active' || !room.chessState) return;
+        const activeSeat = room.seats[room.chessState.activeSeatIndex];
+        if (!activeSeat || activeSeat.kind !== 'human' || activeSeat.playerId !== client.playerId) {
+          this.send(client.ws, 'room:error', { error: 'Wait for your turn.' });
+          return;
+        }
+        const from = Number(payload.from);
+        const to = Number(payload.to);
+        const promo = (['Q', 'R', 'B', 'N'].includes(String(payload.promo)) ? payload.promo : undefined) as
+          | PromoKind
+          | undefined;
+        const legal = getLegalChessMoves(room.chessState, from);
+        const matched = legal.find((m) => m.to === to && (!m.promo || m.promo === (promo || 'Q')));
+        if (!matched) {
+          this.send(client.ws, 'room:error', { error: 'Illegal chess move.' });
+          return;
+        }
+        this.applyChessRoomMove(room, matched);
         break;
       }
     }
@@ -873,12 +981,10 @@ export class RealtimeHub {
       s.lastClue = null;
       s.lastProximity = null;
       s.crackedAtMs = null;
+      s.team = assignSeatTeam(room.gameId, s.seatIndex);
     }
 
     if (room.gameId === 'tictactoe') {
-      room.seats.forEach((s, i) => {
-        s.team = i % 2 === 0 ? 'X' : 'O';
-      });
       const boardSize = room.tttBoardSize || 3;
       const winTarget = room.tttWinTarget || 3;
       const firstX = room.seats.findIndex((s) => s.team === 'X');
@@ -898,6 +1004,30 @@ export class RealtimeHub {
       return;
     }
 
+    if (room.gameId === 'connect_four') {
+      room.connectFourState = {
+        board: createC4Board(),
+        currentTeam: 'R',
+        activeSeatIndex: 0,
+        winnerTeam: null,
+        winLine: null,
+        lastCol: null,
+      };
+      this.broadcastRoom(room);
+      this.maybeScheduleC4Ai(room);
+      return;
+    }
+
+    if (room.gameId === 'chess') {
+      room.chessState = {
+        ...createInitialChessState(),
+        activeSeatIndex: 0,
+      };
+      this.broadcastRoom(room);
+      this.maybeScheduleChessAi(room);
+      return;
+    }
+
     if (room.gameId === 'rps') {
       room.rpsState = {
         targetWins: room.rpsTargetWins || 3,
@@ -911,7 +1041,6 @@ export class RealtimeHub {
       return;
     }
 
-    // Guess the Number race
     const preset = GUESS_PRESETS.medium;
     const secretNumber = crypto.randomInt(preset.min, preset.max + 1);
     for (const s of room.seats) {
@@ -932,11 +1061,150 @@ export class RealtimeHub {
       feed: [],
     };
     this.broadcastRoom(room);
-
-    // Schedule genuine AI guess ticks every 2.4s
     const aiInterval = setInterval(() => this.stepGuessAiBots(room.id), 2400);
     const deadlineTimer = setTimeout(() => this.handleGuessTimeout(room.id), 90_200);
     room.aiTimers.push(aiInterval, deadlineTimer);
+  }
+
+  private maybeScheduleC4Ai(room: InternalRoom) {
+    if (room.status !== 'active' || !room.connectFourState) return;
+    const activeSeat = room.seats[room.connectFourState.activeSeatIndex];
+    if (!activeSeat || activeSeat.kind !== 'ai') return;
+
+    const timer = setTimeout(() => {
+      if (room.status !== 'active' || !room.connectFourState) return;
+      const col = chooseC4AiMove(
+        room.connectFourState.board as C4Cell[],
+        activeSeat.aiDifficulty || 'medium',
+        room.connectFourState.currentTeam
+      );
+      if (col >= 0) this.applyC4Move(room, col);
+    }, 600);
+    room.aiTimers.push(timer);
+  }
+
+  private applyC4Move(room: InternalRoom, col: number) {
+    if (!room.connectFourState) return;
+    const c4 = room.connectFourState;
+    const row = getC4DropRow(c4.board as C4Cell[], col);
+    if (row < 0) {
+      const seat = room.seats[c4.activeSeatIndex];
+      if (seat?.kind === 'human' && seat.playerId) {
+        this.sendToPlayer(seat.playerId, 'room:error', { error: 'Column is full. Choose another column.' });
+      }
+      return;
+    }
+
+    c4.board[row * C4_COLS + col] = c4.currentTeam;
+    c4.lastCol = col;
+    const evalRes = evaluateC4Board(c4.board as C4Cell[]);
+    if (evalRes.winner) {
+      this.clearRoomTimers(room);
+      room.status = 'finished';
+      c4.winnerTeam = evalRes.winner;
+      c4.winLine = evalRes.line;
+
+      const winners = evalRes.winner === 'draw' ? [] : room.seats.filter((s) => s.team === evalRes.winner);
+      room.winnerSummary =
+        evalRes.winner === 'draw'
+          ? 'Connect Four ended in a draw!'
+          : `${winners.map((w) => w.username).join(' & ')} (${evalRes.winner === 'R' ? 'Orange' : 'Blue'}) connected 4!`;
+
+      const durationSec = Math.max(4, Math.round((Date.now() - room.startedAt) / 1000));
+      for (const s of room.seats) {
+        if (s.kind === 'human' && s.playerId) {
+          const outcome: 'win' | 'loss' | 'draw' =
+            evalRes.winner === 'draw' ? 'draw' : s.team === evalRes.winner ? 'win' : 'loss';
+          if (outcome === 'win') s.score += 1;
+          recordMatchAndProgress({
+            playerId: s.playerId,
+            gameId: 'connect_four',
+            mode: room.mode,
+            difficulty: 'medium',
+            outcome,
+            opponentLabel: room.mode === 'mixed' ? 'Mixed Arena' : 'Online Rival',
+            scoreDelta: outcome === 'win' ? 130 : outcome === 'draw' ? 45 : 15,
+            xpEarned: outcome === 'win' ? 75 : outcome === 'draw' ? 35 : 18,
+            coinsEarned: outcome === 'win' ? 40 : outcome === 'draw' ? 16 : 6,
+            durationSec,
+            summary: room.winnerSummary,
+          });
+        }
+      }
+      this.pushSystemChat(room, room.winnerSummary);
+      this.broadcastRoom(room);
+      this.broadcastPresenceAndRooms();
+      return;
+    }
+
+    c4.currentTeam = c4.currentTeam === 'R' ? 'Y' : 'R';
+    const nextIdx = room.seats.findIndex((s) => s.team === c4.currentTeam);
+    c4.activeSeatIndex = nextIdx >= 0 ? nextIdx : (c4.activeSeatIndex + 1) % room.seats.length;
+    this.broadcastRoom(room);
+    this.maybeScheduleC4Ai(room);
+  }
+
+  private maybeScheduleChessAi(room: InternalRoom) {
+    if (room.status !== 'active' || !room.chessState) return;
+    const activeSeat = room.seats[room.chessState.activeSeatIndex];
+    if (!activeSeat || activeSeat.kind !== 'ai') return;
+
+    const timer = setTimeout(() => {
+      if (room.status !== 'active' || !room.chessState) return;
+      const move = chooseChessAiMove(room.chessState, activeSeat.aiDifficulty || 'medium');
+      if (move) this.applyChessRoomMove(room, move);
+    }, 650);
+    room.aiTimers.push(timer);
+  }
+
+  private applyChessRoomMove(room: InternalRoom, move: { from: number; to: number; promo?: PromoKind; isCastle?: 'K' | 'Q'; isEnPassant?: boolean }) {
+    if (!room.chessState) return;
+    const next = applyChessMove(room.chessState, move);
+    const nextSeatIdx = next.turn === 'w' ? 0 : 1;
+    room.chessState = {
+      ...next,
+      activeSeatIndex: nextSeatIdx < room.seats.length ? nextSeatIdx : 0,
+    };
+
+    if (next.winnerTeam) {
+      this.clearRoomTimers(room);
+      room.status = 'finished';
+      const winTeamCode = next.winnerTeam === 'w' ? 'W' : next.winnerTeam === 'b' ? 'B' : null;
+      const winners = winTeamCode ? room.seats.filter((s) => s.team === winTeamCode) : [];
+      room.winnerSummary =
+        next.winnerTeam === 'draw'
+          ? next.statusText
+          : `${winners.map((w) => w.username).join(' & ')} (${next.winnerTeam === 'w' ? 'White' : 'Black'}) wins by Checkmate!`;
+
+      const durationSec = Math.max(5, Math.round((Date.now() - room.startedAt) / 1000));
+      for (const s of room.seats) {
+        if (s.kind === 'human' && s.playerId) {
+          const outcome: 'win' | 'loss' | 'draw' =
+            next.winnerTeam === 'draw' ? 'draw' : s.team === winTeamCode ? 'win' : 'loss';
+          if (outcome === 'win') s.score += 1;
+          recordMatchAndProgress({
+            playerId: s.playerId,
+            gameId: 'chess',
+            mode: room.mode,
+            difficulty: 'medium',
+            outcome,
+            opponentLabel: room.mode === 'mixed' ? 'Mixed Chess AI' : 'Online Grandmaster Rival',
+            scoreDelta: outcome === 'win' ? 180 : outcome === 'draw' ? 60 : 20,
+            xpEarned: outcome === 'win' ? 110 : outcome === 'draw' ? 45 : 22,
+            coinsEarned: outcome === 'win' ? 55 : outcome === 'draw' ? 22 : 8,
+            durationSec,
+            summary: room.winnerSummary,
+          });
+        }
+      }
+      this.pushSystemChat(room, room.winnerSummary);
+      this.broadcastRoom(room);
+      this.broadcastPresenceAndRooms();
+      return;
+    }
+
+    this.broadcastRoom(room);
+    this.maybeScheduleChessAi(room);
   }
 
   private maybeScheduleTttAi(room: InternalRoom) {
@@ -949,7 +1217,7 @@ export class RealtimeHub {
       const move = chooseTttAiMove(
         room.tttState.board as TttCell[],
         activeSeat.aiDifficulty || 'medium',
-        activeSeat.team || 'O',
+        (activeSeat.team === 'X' ? 'X' : 'O') as 'X' | 'O',
         room.tttState.boardSize,
         room.tttState.winTarget
       );
@@ -1005,12 +1273,12 @@ export class RealtimeHub {
           });
         }
       }
+      this.pushSystemChat(room, room.winnerSummary);
       this.broadcastRoom(room);
       this.broadcastPresenceAndRooms();
       return;
     }
 
-    // Advance turn to next team & rotate seat within that team (for 2v2 mixed tag-team)
     const nextTeam: 'X' | 'O' = team === 'X' ? 'O' : 'X';
     const nextTeamSeats = room.seats.filter((s) => s.team === nextTeam);
     if (nextTeamSeats.length > 0) {
@@ -1043,7 +1311,6 @@ export class RealtimeHub {
     if (!room.rpsState) return;
     this.clearRoomTimers(room);
 
-    // AI seats pick server-side
     for (const s of room.seats) {
       if (s.kind === 'ai') {
         s.secretPick = chooseRpsAiMove(s.aiDifficulty || 'medium', []);
@@ -1052,7 +1319,6 @@ export class RealtimeHub {
       s.revealedPick = s.secretPick;
     }
 
-    // Pairwise round scoring: each seat gets +1 point for each opponent beaten
     const roundGain = new Map<number, number>();
     for (const a of room.seats) {
       let pts = 0;
@@ -1105,6 +1371,7 @@ export class RealtimeHub {
           });
         }
       }
+      this.pushSystemChat(room, room.winnerSummary);
       this.broadcastRoom(room);
       this.broadcastPresenceAndRooms();
       return;
@@ -1114,7 +1381,6 @@ export class RealtimeHub {
     room.rpsState.roundDeadlineAt = Date.now() + 3000;
     this.broadcastRoom(room);
 
-    // Pause briefly to display revealed choices, then open next round
     const nextTimer = setTimeout(() => {
       if (room.status !== 'active' || !room.rpsState) return;
       for (const s of room.seats) {
@@ -1136,9 +1402,7 @@ export class RealtimeHub {
     if (!room || room.status !== 'active' || !room.guessState) return;
     const gs = room.guessState;
 
-    const aiSeats = room.seats.filter(
-      (s) => s.kind === 'ai' && (s.guessCount || 0) < gs.maxAttempts
-    );
+    const aiSeats = room.seats.filter((s) => s.kind === 'ai' && (s.guessCount || 0) < gs.maxAttempts);
     if (aiSeats.length === 0) return;
     const bot = aiSeats[crypto.randomInt(0, aiSeats.length)];
     const low = Math.max(gs.min, bot.aiLow ?? gs.min);
@@ -1196,16 +1460,17 @@ export class RealtimeHub {
             mode: room.mode,
             difficulty: gs.difficulty,
             outcome,
-            opponentLabel: room.mode === 'mixed' ? 'Mixed Vault Race' : 'Online Racer',
-            scoreDelta: outcome === 'win' ? 160 : 20,
-            xpEarned: outcome === 'win' ? 80 : 20,
-            coinsEarned: outcome === 'win' ? 42 : 8,
+            opponentLabel: room.mode === 'mixed' ? 'Mixed Vault Race' : 'Online Vault Rival',
+            scoreDelta: outcome === 'win' ? 145 : 15,
+            xpEarned: outcome === 'win' ? 80 : 18,
+            coinsEarned: outcome === 'win' ? 40 : 6,
             durationSec,
             summary: room.winnerSummary,
-            attemptsUsed: outcome === 'win' ? seat.guessCount : undefined,
+            attemptsUsed: s.guessCount || 10,
           });
         }
       }
+      this.pushSystemChat(room, room.winnerSummary);
       this.broadcastRoom(room);
       this.broadcastPresenceAndRooms();
       return;
@@ -1219,9 +1484,11 @@ export class RealtimeHub {
     seat.lastClue = clue;
     seat.lastProximity = proximity;
 
-    if (seat.kind === 'ai') {
-      if (clue === 'higher') seat.aiLow = Math.max(seat.aiLow ?? gs.min, guess + 1);
-      else seat.aiHigh = Math.min(seat.aiHigh ?? gs.max, guess - 1);
+    for (const s of room.seats) {
+      if (s.kind === 'ai') {
+        if (clue === 'higher') s.aiLow = Math.max(s.aiLow ?? gs.min, guess + 1);
+        else s.aiHigh = Math.min(s.aiHigh ?? gs.max, guess - 1);
+      }
     }
 
     gs.feed.unshift({
@@ -1236,14 +1503,8 @@ export class RealtimeHub {
     });
     gs.feed = gs.feed.slice(0, 24);
 
-    // Check if all participants exhausted maxAttempts
     if (room.seats.every((s) => (s.guessCount || 0) >= gs.maxAttempts)) {
-      this.clearRoomTimers(room);
-      room.status = 'finished';
-      gs.revealedSecret = gs.secretNumber;
-      room.winnerSummary = `Vault locked! Nobody cracked secret #${gs.secretNumber}.`;
-      this.broadcastRoom(room);
-      this.broadcastPresenceAndRooms();
+      this.handleGuessTimeout(room.id);
       return;
     }
 
@@ -1256,7 +1517,9 @@ export class RealtimeHub {
     this.clearRoomTimers(room);
     room.status = 'finished';
     room.guessState.revealedSecret = room.guessState.secretNumber;
-    room.winnerSummary = `Time expired! The secret number was ${room.guessState.secretNumber}.`;
+    room.winnerSummary = `Time expired — no one cracked secret #${room.guessState.secretNumber}.`;
+
+    const durationSec = Math.max(5, Math.round((Date.now() - room.startedAt) / 1000));
     for (const s of room.seats) {
       if (s.kind === 'human' && s.playerId) {
         recordMatchAndProgress({
@@ -1264,16 +1527,17 @@ export class RealtimeHub {
           gameId: 'guess_number',
           mode: room.mode,
           difficulty: room.guessState.difficulty,
-          outcome: 'loss',
-          opponentLabel: room.mode === 'mixed' ? 'Mixed Vault Race' : 'Online Racer',
-          scoreDelta: 10,
-          xpEarned: 15,
-          coinsEarned: 5,
-          durationSec: 90,
+          outcome: 'draw',
+          opponentLabel: room.mode === 'mixed' ? 'Mixed Vault Race' : 'Online Vault Rival',
+          scoreDelta: 20,
+          xpEarned: 18,
+          coinsEarned: 8,
+          durationSec,
           summary: room.winnerSummary,
         });
       }
     }
+    this.pushSystemChat(room, room.winnerSummary);
     this.broadcastRoom(room);
     this.broadcastPresenceAndRooms();
   }

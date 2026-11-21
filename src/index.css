@@ -4,6 +4,8 @@
 @layer base {
   body {
     font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    background-color: #060811;
+    color: #f8fafc;
   }
 
   h1, h2, h3, .font-display {
@@ -19,10 +21,39 @@
   font-variant-numeric: tabular-nums;
 }
 
+.playnova-backdrop {
+  background-image:
+    radial-gradient(ellipse 75% 45% at 15% 0%, rgba(139, 92, 246, 0.14), transparent 70%),
+    radial-gradient(ellipse 65% 40% at 85% 10%, rgba(56, 189, 248, 0.11), transparent 70%),
+    radial-gradient(ellipse 60% 35% at 50% 100%, rgba(249, 115, 22, 0.08), transparent 75%);
+}
+
+@keyframes nova-drift {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 0.48;
+  }
+  50% {
+    transform: translate3d(0, -10px, 0) scale(1.03);
+    opacity: 0.68;
+  }
+}
+
+.animate-nova-drift {
+  animation: nova-drift 9s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
 .reduce-motion *,
 .reduce-motion *::before,
 .reduce-motion *::after {
   animation-duration: 0.001ms !important;
   animation-iteration-count: 1 !important;
   transition-duration: 0.001ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-nova-drift {
+    animation: none;
+  }
 }

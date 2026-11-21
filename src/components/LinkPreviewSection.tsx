@@ -59,14 +59,15 @@ interface LinkPreviewSectionProps {
 export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
   const presetLinks = [
-    { label: 'GAMEVERSE Hub', url: `${origin}/` },
+    { label: 'PLAYNOVA Hub', url: `${origin}/` },
+    { label: 'Chess Arena', url: `${origin}/games/chess` },
+    { label: 'Connect Four', url: `${origin}/games/connect_four` },
     { label: 'Tic-Tac-Toe', url: `${origin}/games/tictactoe` },
-    { label: 'Rock-Paper-Scissors', url: `${origin}/games/rps` },
-    { label: 'Guess the Number', url: `${origin}/games/guess_number` },
+    { label: 'Tournaments', url: `${origin}/tournaments` },
     { label: 'Leaderboard', url: `${origin}/leaderboard` },
   ];
 
-  const [urlInput, setUrlInput] = useState(`${origin}/games/tictactoe`);
+  const [urlInput, setUrlInput] = useState(`${origin}/`);
   const [noteInput, setNoteInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [publishing, setPublishing] = useState(false);
@@ -209,7 +210,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
       });
       setSharedLinks((prev) => [res.sharedLink, ...prev]);
       setNoteInput('');
-      setPublishNotice('Link preview published to the GAMEVERSE shared feed.');
+      setPublishNotice('Link preview published to the PLAYNOVA shared feed.');
       soundFx.playWin();
       onShared?.();
     } catch (err) {
@@ -222,7 +223,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
   const shareTargetUrl = preview?.finalUrl || urlInput.trim() || origin;
   const shareText = preview
     ? `${preview.title} — ${preview.description}`
-    : 'Check out GAMEVERSE — Play. Compete. Earn. Conquer.';
+    : 'PLAYNOVA — ENTER. COMPETE. CONQUER.';
 
   const shareChannels = [
     {
@@ -249,14 +250,14 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
     <div className="space-y-8">
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between border-b border-white/[0.08] pb-6">
         <div>
-          <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#E11D48]">
+          <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#38BDF8]">
             Open Graph & Social Card Inspector
           </p>
           <h1 className="mt-1 font-display text-3xl font-bold tracking-tight text-white">
-            Link Preview Studio
+            PLAYNOVA Link Preview Studio
           </h1>
           <p className="mt-2 max-w-2xl text-sm text-slate-400">
-            Inspect live Open Graph and Twitter Card previews for any GAMEVERSE arena route or external website before sharing across WhatsApp, Telegram, Facebook, or X.
+            Inspect live Open Graph and Twitter Card previews for any PLAYNOVA arena route or external website before sharing across WhatsApp, Telegram, Facebook, or X.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -268,7 +269,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                 setUrlInput(preset.url);
                 void handleGenerate(preset.url);
               }}
-              className="rounded-lg border border-white/[0.1] bg-[#10141F] px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-[#E11D48]/60 hover:text-white cursor-pointer"
+              className="rounded-lg border border-white/[0.1] bg-[#0E1324] px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:border-[#8B5CF6]/60 hover:text-white cursor-pointer"
             >
               {preset.label}
             </button>
@@ -276,9 +277,9 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
         </div>
       </div>
 
-      {/* Published GAMEVERSE Website Social Metadata & Cache Refresh Panel */}
+      {/* Published PLAYNOVA Website Social Metadata & Cache Refresh Panel */}
       {siteStatus && (
-        <div className="rounded-xl border border-white/[0.1] bg-[#10141F] p-6 space-y-5">
+        <div className="rounded-2xl border border-white/[0.1] bg-[#0E1324] p-6 space-y-5">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
               <p className="text-xs font-mono uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
@@ -291,7 +292,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
               <p className="mt-0.5 text-xs text-slate-400">
                 Canonical URL:{' '}
                 <span className="font-mono text-slate-200">{siteStatus.metadata.ogUrl}</span> · Image Version{' '}
-                <span className="font-mono text-[#F59E0B]">v={siteStatus.previewVersion}</span>
+                <span className="font-mono text-[#F97316]">v={siteStatus.previewVersion}</span>
               </p>
             </div>
 
@@ -313,12 +314,12 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                 type="button"
                 disabled={verifyingTarget !== null}
                 onClick={() => void handleVerifySitePreview('local')}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.12] bg-[#0B0E17] px-3.5 py-2 text-xs font-semibold text-slate-200 hover:border-white/25 disabled:opacity-50 cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.12] bg-[#090D1A] px-3.5 py-2 text-xs font-semibold text-slate-200 hover:border-white/25 disabled:opacity-50 cursor-pointer"
               >
                 {verifyingTarget === 'local' ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
-                  <ShieldCheck className="h-3.5 w-3.5 text-[#F59E0B]" />
+                  <ShieldCheck className="h-3.5 w-3.5 text-[#F97316]" />
                 )}
                 Test Server HTML
               </button>
@@ -326,7 +327,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                 type="button"
                 disabled={refreshingCache}
                 onClick={() => void handleRefreshPreviewCache()}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-[#E11D48] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#BE123C] disabled:opacity-50 cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#8B5CF6] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#7C3AED] disabled:opacity-50 cursor-pointer"
               >
                 {refreshingCache ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -345,35 +346,35 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
           )}
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-            <div className="lg:col-span-5 overflow-hidden rounded-xl border border-white/[0.08] bg-[#0B0E17]">
+            <div className="lg:col-span-5 overflow-hidden rounded-xl border border-white/[0.08] bg-[#090D1A]">
               <img
                 src={`/og-hero.jpg?v=${siteStatus.previewVersion}`}
-                alt="GAMEVERSE Open Graph hero preview"
+                alt="PLAYNOVA Open Graph hero preview"
                 className="aspect-[16/9] w-full object-cover border-b border-white/[0.08]"
               />
               <div className="p-3.5 space-y-1">
-                <p className="font-mono text-[10px] uppercase tracking-wider text-[#F59E0B]">
-                  GAMEVERSE · {siteStatus.metadata.twitterCard}
+                <p className="font-mono text-[10px] uppercase tracking-wider text-[#F97316]">
+                  PLAYNOVA · {siteStatus.metadata.twitterCard}
                 </p>
                 <p className="font-display text-sm font-bold text-white">{siteStatus.metadata.ogTitle}</p>
                 <p className="text-xs text-slate-400">{siteStatus.metadata.ogDescription}</p>
               </div>
             </div>
 
-            <div className="lg:col-span-7 flex flex-col justify-between space-y-3 rounded-xl border border-white/[0.08] bg-[#0B0E17] p-4 text-xs">
+            <div className="lg:col-span-7 flex flex-col justify-between space-y-3 rounded-xl border border-white/[0.08] bg-[#090D1A] p-4 text-xs">
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <div>
-                  <span className="font-mono text-[10px] text-[#F59E0B]">og:image (HTTPS)</span>
+                  <span className="font-mono text-[10px] text-[#38BDF8]">og:image (HTTPS)</span>
                   <p className="mt-0.5 break-all text-slate-300">{siteStatus.metadata.ogImage}</p>
                 </div>
                 <div>
-                  <span className="font-mono text-[10px] text-[#F59E0B]">Cache-Busted Share URL</span>
+                  <span className="font-mono text-[10px] text-[#38BDF8]">Cache-Busted Share URL</span>
                   <div className="mt-0.5 flex items-center gap-2">
                     <span className="truncate font-mono text-slate-200">{siteStatus.shareUrlWithVersion}</span>
                     <button
                       type="button"
                       onClick={() => void handleCopy(siteStatus.shareUrlWithVersion)}
-                      className="shrink-0 rounded border border-white/[0.15] px-2 py-0.5 text-[10px] font-semibold text-white hover:border-[#E11D48] cursor-pointer"
+                      className="shrink-0 rounded border border-white/[0.15] px-2 py-0.5 text-[10px] font-semibold text-white hover:border-[#8B5CF6] cursor-pointer"
                     >
                       Copy
                     </button>
@@ -387,7 +388,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                   href={`https://developers.facebook.com/tools/debug/?q=${encodeURIComponent(siteStatus.shareUrlWithVersion)}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 rounded border border-white/[0.1] bg-[#10141F] px-2.5 py-1 text-[11px] text-slate-200 hover:border-[#E11D48]"
+                  className="inline-flex items-center gap-1 rounded border border-white/[0.1] bg-[#0E1324] px-2.5 py-1 text-[11px] text-slate-200 hover:border-[#8B5CF6]"
                 >
                   Facebook Scraper <ExternalLink className="h-3 w-3" />
                 </a>
@@ -395,22 +396,22 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                   href={`https://www.linkedin.com/post-inspector/inspect/${encodeURIComponent(siteStatus.shareUrlWithVersion)}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 rounded border border-white/[0.1] bg-[#10141F] px-2.5 py-1 text-[11px] text-slate-200 hover:border-[#E11D48]"
+                  className="inline-flex items-center gap-1 rounded border border-white/[0.1] bg-[#0E1324] px-2.5 py-1 text-[11px] text-slate-200 hover:border-[#8B5CF6]"
                 >
                   LinkedIn Inspector <ExternalLink className="h-3 w-3" />
                 </a>
                 <a
-                  href={`https://t.me/WebpageBot`}
+                  href="https://t.me/WebpageBot"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 rounded border border-white/[0.1] bg-[#10141F] px-2.5 py-1 text-[11px] text-slate-200 hover:border-[#E11D48]"
+                  className="inline-flex items-center gap-1 rounded border border-white/[0.1] bg-[#0E1324] px-2.5 py-1 text-[11px] text-slate-200 hover:border-[#8B5CF6]"
                 >
                   Telegram @WebpageBot <ExternalLink className="h-3 w-3" />
                 </a>
               </div>
 
               {auditResult && (
-                <div className="rounded-lg border border-white/[0.08] bg-[#10141F] p-3 space-y-1.5">
+                <div className="rounded-lg border border-white/[0.08] bg-[#0E1324] p-3 space-y-1.5">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-mono text-[11px] font-bold text-white">
                       Audit: {auditResult.targetUrl}
@@ -446,15 +447,15 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
 
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-12">
         <div className="lg:col-span-7 space-y-6">
-          <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6">
-            <label htmlFor="gv-preview-url" className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6">
+            <label htmlFor="pn-preview-url" className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
               Destination URL
             </label>
             <div className="mt-2 flex flex-col gap-3 sm:flex-row">
               <div className="relative flex-1">
                 <Link2 className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                 <input
-                  id="gv-preview-url"
+                  id="pn-preview-url"
                   type="url"
                   value={urlInput}
                   onChange={(e) => setUrlInput(e.target.value)}
@@ -464,15 +465,15 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                       void handleGenerate();
                     }
                   }}
-                  placeholder="https://example.com or http://localhost:3000/games/tictactoe"
-                  className="w-full rounded-lg border border-white/[0.1] bg-[#07090F] py-2.5 pl-10 pr-3.5 text-sm text-white placeholder-slate-500 focus:border-[#E11D48] focus:outline-none"
+                  placeholder="https://example.com or http://localhost:3000/games/chess"
+                  className="w-full rounded-lg border border-white/[0.1] bg-[#060811] py-2.5 pl-10 pr-3.5 text-sm text-white placeholder-slate-500 focus:border-[#8B5CF6] focus:outline-none"
                 />
               </div>
               <button
                 type="button"
                 disabled={loading}
                 onClick={() => void handleGenerate()}
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#E11D48] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#BE123C] disabled:opacity-60 cursor-pointer"
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#8B5CF6] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#7C3AED] disabled:opacity-60 cursor-pointer"
               >
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
                 Generate Preview
@@ -480,7 +481,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
               <button
                 type="button"
                 onClick={handleClear}
-                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#0B0E17] px-3.5 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-white/[0.06] hover:text-white cursor-pointer"
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#090D1A] px-3.5 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-white/[0.06] hover:text-white cursor-pointer"
               >
                 <Trash2 className="h-4 w-4" />
                 Clear
@@ -505,16 +506,16 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
 
             <div className="mt-6">
               {loading && (
-                <div className="flex flex-col items-center justify-center rounded-xl border border-white/[0.08] bg-[#0B0E17] py-16 text-slate-400">
-                  <Loader2 className="h-7 w-7 animate-spin text-[#E11D48]" />
+                <div className="flex flex-col items-center justify-center rounded-xl border border-white/[0.08] bg-[#090D1A] py-16 text-slate-400">
+                  <Loader2 className="h-7 w-7 animate-spin text-[#8B5CF6]" />
                   <p className="mt-3 text-sm font-medium text-white">Fetching live metadata & thumbnail...</p>
                   <p className="mt-1 text-xs text-slate-500">Validating scheme, safety rules, Open Graph & Twitter tags</p>
                 </div>
               )}
 
               {!loading && preview && (
-                <div className="overflow-hidden rounded-xl border border-white/[0.1] bg-[#0B0E17]">
-                  <div className="relative aspect-[16/9] w-full bg-[#07090F] border-b border-white/[0.08] flex items-center justify-center overflow-hidden">
+                <div className="overflow-hidden rounded-xl border border-white/[0.1] bg-[#090D1A]">
+                  <div className="relative aspect-[16/9] w-full bg-[#060811] border-b border-white/[0.08] flex items-center justify-center overflow-hidden">
                     {preview.image && !imgBroken ? (
                       <img
                         src={preview.image}
@@ -550,7 +551,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                             className="h-4 w-4 rounded-sm object-contain"
                           />
                         )}
-                        <span className="truncate font-mono uppercase tracking-wider text-[#F59E0B]">
+                        <span className="truncate font-mono uppercase tracking-wider text-[#F97316]">
                           {preview.siteName}
                         </span>
                       </div>
@@ -578,7 +579,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                       <button
                         type="button"
                         onClick={() => void handleCopy(preview.finalUrl)}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#10141F] px-3 py-1.5 text-xs font-semibold text-white transition hover:border-white/25 cursor-pointer"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#0E1324] px-3 py-1.5 text-xs font-semibold text-white transition hover:border-white/25 cursor-pointer"
                       >
                         {copiedUrl ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
                         {copiedUrl ? 'Copied' : 'Copy Link'}
@@ -589,8 +590,8 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
               )}
 
               {!loading && !preview && !errorMsg && (
-                <div className="rounded-xl border border-dashed border-white/[0.12] bg-[#0B0E17] py-14 text-center text-sm text-slate-400">
-                  Enter any link above or select a GAMEVERSE preset route to inspect its share card.
+                <div className="rounded-xl border border-dashed border-white/[0.12] bg-[#090D1A] py-14 text-center text-sm text-slate-400">
+                  Enter any link above or select a PLAYNOVA preset route to inspect its share card.
                 </div>
               )}
             </div>
@@ -608,9 +609,9 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                         href={ch.href}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#0B0E17] px-3.5 py-2 text-xs font-semibold text-slate-200 transition hover:border-[#E11D48]/60 hover:text-white"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#090D1A] px-3.5 py-2 text-xs font-semibold text-slate-200 transition hover:border-[#8B5CF6]/60 hover:text-white"
                       >
-                        <Share2 className="h-3.5 w-3.5 text-[#E11D48]" />
+                        <Share2 className="h-3.5 w-3.5 text-[#8B5CF6]" />
                         {ch.name}
                       </a>
                     ))}
@@ -619,23 +620,23 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
 
                 {!preview.fallback && (
                   <form onSubmit={handlePublishToFeed} className="border-t border-white/[0.08] pt-4">
-                    <label htmlFor="gv-share-note" className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
-                      Publish to GAMEVERSE Community Feed (Optional Note)
+                    <label htmlFor="pn-share-note" className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      Publish to PLAYNOVA Community Feed (Optional Note)
                     </label>
                     <div className="mt-2 flex flex-col gap-2.5 sm:flex-row">
                       <input
-                        id="gv-share-note"
+                        id="pn-share-note"
                         type="text"
                         maxLength={180}
                         value={noteInput}
                         onChange={(e) => setNoteInput(e.target.value)}
-                        placeholder="Challenge friends to beat your Tic-Tac-Toe streak..."
-                        className="flex-1 rounded-lg border border-white/[0.1] bg-[#07090F] px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:border-[#E11D48] focus:outline-none"
+                        placeholder="Challenge friends to a PLAYNOVA tournament..."
+                        className="flex-1 rounded-lg border border-white/[0.1] bg-[#060811] px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:border-[#8B5CF6] focus:outline-none"
                       />
                       <button
                         type="submit"
                         disabled={publishing}
-                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#F59E0B] px-4 py-2 text-sm font-semibold text-[#07090F] transition hover:bg-[#D97706] disabled:opacity-60 cursor-pointer"
+                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#F97316] px-4 py-2 text-sm font-bold text-[#060811] transition hover:bg-[#EA580C] disabled:opacity-60 cursor-pointer"
                       >
                         {publishing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                         Publish Link
@@ -648,7 +649,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
           </div>
 
           {preview?.metaTags && (
-            <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6">
+            <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6">
               <h3 className="font-display text-base font-semibold text-white">
                 Extracted Open Graph & Twitter Metadata
               </h3>
@@ -662,8 +663,8 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                   ['twitter:title', preview.metaTags.twitterTitle],
                   ['twitter:image', preview.metaTags.twitterImage],
                 ].map(([tag, val]) => (
-                  <div key={tag} className="rounded-lg border border-white/[0.06] bg-[#0B0E17] p-3">
-                    <dt className="font-mono text-[11px] text-[#F59E0B]">{tag}</dt>
+                  <div key={tag} className="rounded-lg border border-white/[0.06] bg-[#090D1A] p-3">
+                    <dt className="font-mono text-[11px] text-[#38BDF8]">{tag}</dt>
                     <dd className="mt-1 break-all text-slate-300">{val || 'Not specified'}</dd>
                   </div>
                 ))}
@@ -673,11 +674,11 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
         </div>
 
         <div className="lg:col-span-5">
-          <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6">
+          <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6">
             <div className="flex items-center justify-between border-b border-white/[0.08] pb-4">
               <div>
                 <h2 className="font-display text-lg font-bold text-white">Shared Arena Links</h2>
-                <p className="text-xs text-slate-400">Verified previews published by GAMEVERSE players</p>
+                <p className="text-xs text-slate-400">Verified previews published by PLAYNOVA players</p>
               </div>
               <span className="font-mono text-xs text-slate-400 tabular-nums">{sharedLinks.length} saved</span>
             </div>
@@ -693,10 +694,10 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                 {sharedLinks.map((item) => (
                   <div
                     key={item.id}
-                    className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#0B0E17] transition hover:border-white/20"
+                    className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#090D1A] transition hover:border-white/20"
                   >
                     {item.imageUrl && (
-                      <div className="aspect-[16/9] w-full overflow-hidden bg-[#07090F] border-b border-white/[0.06]">
+                      <div className="aspect-[16/9] w-full overflow-hidden bg-[#060811] border-b border-white/[0.06]">
                         <img
                           src={item.imageUrl}
                           alt={item.title}
@@ -742,7 +743,7 @@ export function LinkPreviewSection({ onShared }: LinkPreviewSectionProps) {
                             setUrlInput(item.url);
                             void handleGenerate(item.url);
                           }}
-                          className="text-xs font-semibold text-[#E11D48] hover:underline cursor-pointer"
+                          className="text-xs font-semibold text-[#8B5CF6] hover:underline cursor-pointer"
                         >
                           Inspect Preview
                         </button>

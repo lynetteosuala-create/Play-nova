@@ -7,8 +7,10 @@ import {
   Coins,
   Gamepad2,
   Globe,
+  Heart,
   Link2,
   LogOut,
+  Megaphone,
   Menu,
   Play,
   Shield,
@@ -21,7 +23,7 @@ import {
 import { GAME_ASSETS } from './assets/gameAssets.ts';
 import { AdminDashboard } from './components/AdminDashboard.tsx';
 import { GuessNumberGame } from './components/GuessNumberGame.tsx';
-import { HomepageHero } from './components/HomepageHero.tsx';
+import { getGameArtwork, HomepageHero } from './components/HomepageHero.tsx';
 import { LeaderboardSection } from './components/LeaderboardSection.tsx';
 import { LinkPreviewSection } from './components/LinkPreviewSection.tsx';
 import { MultiplayerSection } from './components/MultiplayerSection.tsx';
@@ -30,37 +32,54 @@ import { ProfileRewardsSection } from './components/ProfileRewardsSection.tsx';
 import { RockPaperScissorsGame } from './components/RockPaperScissorsGame.tsx';
 import { SessionRecoveryModal } from './components/SessionRecoveryModal.tsx';
 import { TicTacToeGame } from './components/TicTacToeGame.tsx';
+import { TournamentsSection } from './components/TournamentsSection.tsx';
 import { UsernameEntryModal } from './components/UsernameEntryModal.tsx';
-import { GAME_CATALOG } from './game/catalog.ts';
+import { ChessGame } from './components/games/ChessGame.tsx';
+import { ConnectFourGame } from './components/games/ConnectFourGame.tsx';
+import { MemoryMatchGame } from './components/games/MemoryMatchGame.tsx';
+import { PatternRecognitionGame } from './components/games/PatternRecognitionGame.tsx';
+import { QuickMathGame } from './components/games/QuickMathGame.tsx';
+import { ReactionTestGame } from './components/games/ReactionTestGame.tsx';
+import { SudokuGame } from './components/games/SudokuGame.tsx';
+import { TriviaChallengeGame } from './components/games/TriviaChallengeGame.tsx';
+import { WordBattleGame } from './components/games/WordBattleGame.tsx';
+import { ALL_GAME_IDS, GAME_CATALOG, GAME_CATEGORIES } from './game/catalog.ts';
 import type {
   AchievementItem,
   AppView,
   ChallengeItem,
   CosmeticRewardItem,
+  GameCategory,
   GameId,
   LeaderboardEntry,
   MatchRecord,
   NotificationItem,
+  PlatformAnnouncement,
   PlayerProfile,
+  TournamentItem,
 } from './types.ts';
 import { apiFetch, getStoredPlayerToken, setStoredPlayerToken } from './utils/api.ts';
 import { soundFx } from './utils/sound.ts';
 import { wsClient, type RealtimeSnapshot } from './utils/wsClient.ts';
-
-const GAME_ART_MAP: Record<GameId, string> = {
-  tictactoe: GAME_ASSETS.ticTacToeArt,
-  rps: GAME_ASSETS.rpsArt,
-  guess_number: GAME_ASSETS.guessNumberArt,
-};
 
 function parseInitialView(): AppView {
   if (typeof window === 'undefined') return 'home';
   const p = window.location.pathname.toLowerCase();
   if (p.startsWith('/lobby')) return 'lobby';
   if (p.startsWith('/multiplayer')) return 'multiplayer';
+  if (p.startsWith('/tournaments')) return 'tournaments';
   if (p.startsWith('/games/tictactoe')) return 'tictactoe';
   if (p.startsWith('/games/rps')) return 'rps';
   if (p.startsWith('/games/guess')) return 'guess_number';
+  if (p.startsWith('/games/connect_four') || p.startsWith('/games/connect-four')) return 'connect_four';
+  if (p.startsWith('/games/chess')) return 'chess';
+  if (p.startsWith('/games/memory')) return 'memory_match';
+  if (p.startsWith('/games/word')) return 'word_battle';
+  if (p.startsWith('/games/trivia')) return 'trivia_challenge';
+  if (p.startsWith('/games/sudoku')) return 'sudoku';
+  if (p.startsWith('/games/quick_math') || p.startsWith('/games/quick-math')) return 'quick_math';
+  if (p.startsWith('/games/reaction')) return 'reaction_test';
+  if (p.startsWith('/games/pattern')) return 'pattern_recognition';
   if (p.startsWith('/games')) return 'games';
   if (p.startsWith('/leaderboard')) return 'leaderboard';
   if (p.startsWith('/link-preview')) return 'link_preview';
@@ -81,14 +100,10 @@ function viewToPath(view: AppView): string {
       return '/lobby';
     case 'multiplayer':
       return '/multiplayer';
+    case 'tournaments':
+      return '/tournaments';
     case 'games':
       return '/games';
-    case 'tictactoe':
-      return '/games/tictactoe';
-    case 'rps':
-      return '/games/rps';
-    case 'guess_number':
-      return '/games/guess_number';
     case 'leaderboard':
       return '/leaderboard';
     case 'link_preview':
@@ -97,8 +112,10 @@ function viewToPath(view: AppView): string {
       return '/profile';
     case 'admin':
       return '/admin';
-    default:
+    case 'home':
       return '/';
+    default:
+      return `/games/${view}`;
   }
 }
 
@@ -107,9 +124,11 @@ export function App() {
   const [player, setPlayer] = useState<PlayerProfile | null>(null);
   const [view, setView] = useState<AppView>(parseInitialView);
   const [multiplayerGame, setMultiplayerGame] = useState<GameId>('tictactoe');
+  const [selectedCategory, setSelectedCategory] = useState<'All' | GameCategory>('All');
   const [rt, setRt] = useState<RealtimeSnapshot>(wsClient.getSnapshot());
 
   const [entryModalOpen, setEntryModalOpen] = useState(false);
+  const [entryPrompt, setEntryPrompt] = useState<string | undefined>(undefined);
   const [pendingTargetView, setPendingTargetView] = useState<AppView | null>(null);
   const [pendingRoomCode, setPendingRoomCode] = useState<string | null>(parseInitialRoomCode);
 
@@ -120,6 +139,8 @@ export function App() {
     totalMatches: 0,
   });
 
+  const [tournaments, setTournaments] = useState<TournamentItem[]>([]);
+  const [announcements, setAnnouncements] = useState<PlatformAnnouncement[]>([]);
   const [challenges, setChallenges] = useState<ChallengeItem[]>([]);
   const [achievements, setAchievements] = useState<AchievementItem[]>([]);
   const [rewards, setRewards] = useState<CosmeticRewardItem[]>([]);
@@ -155,7 +176,7 @@ export function App() {
 
   const loadPublicTelemetry = useCallback(async () => {
     try {
-      const [statsRes, boardRes] = await Promise.all([
+      const [statsRes, boardRes, tourRes, annRes] = await Promise.all([
         apiFetch<{
           onlinePlayers: number;
           activeRooms: number;
@@ -167,9 +188,13 @@ export function App() {
           {},
           { suppressSessionEvent: true }
         ),
+        apiFetch<{ tournaments: TournamentItem[] }>('/api/tournaments', {}, { suppressSessionEvent: true }),
+        apiFetch<{ announcements: PlatformAnnouncement[] }>('/api/announcements', {}, { suppressSessionEvent: true }),
       ]);
       setPublicStats(statsRes);
       setTopLeaders((boardRes.leaderboard || []).slice(0, 5));
+      setTournaments(tourRes.tournaments || []);
+      setAnnouncements(annRes.announcements || []);
     } catch {
       // non-fatal public telemetry fetch
     }
@@ -177,7 +202,7 @@ export function App() {
 
   const loadProgressionAndBoard = useCallback(async () => {
     try {
-      const [prog, board, statsRes] = await Promise.all([
+      const [prog, board, statsRes, tourRes, annRes] = await Promise.all([
         apiFetch<{
           challenges: ChallengeItem[];
           achievements: AchievementItem[];
@@ -192,6 +217,8 @@ export function App() {
           totalPlayers: number;
           totalMatches: number;
         }>('/api/public/stats', {}, { suppressSessionEvent: true }),
+        apiFetch<{ tournaments: TournamentItem[] }>('/api/tournaments', {}, { suppressSessionEvent: true }),
+        apiFetch<{ announcements: PlatformAnnouncement[] }>('/api/announcements', {}, { suppressSessionEvent: true }),
       ]);
       setChallenges(prog.challenges || []);
       setAchievements(prog.achievements || []);
@@ -200,6 +227,8 @@ export function App() {
       setMatches(prog.matches || []);
       setTopLeaders((board.leaderboard || []).slice(0, 5));
       setPublicStats(statsRes);
+      setTournaments(tourRes.tournaments || []);
+      setAnnouncements(annRes.announcements || []);
     } catch {
       // session expiry handled via global event listener
     }
@@ -227,7 +256,7 @@ export function App() {
     });
   }, []);
 
-  // Bootstrap session + public stats
+  // Bootstrap session + public telemetry
   useEffect(() => {
     let active = true;
     async function init() {
@@ -257,6 +286,7 @@ export function App() {
             window.setTimeout(() => wsClient.joinRoomByCode(codeToJoin), 250);
           }
         } else if (pendingRoomCode) {
+          setEntryPrompt(`Enter your username to join live Multiplayer Room ${pendingRoomCode}.`);
           setEntryModalOpen(true);
         }
       } catch (err) {
@@ -311,6 +341,7 @@ export function App() {
     }
     setPlayer(authedPlayer);
     setEntryModalOpen(false);
+    setEntryPrompt(undefined);
     setSessionExpiredModal({ open: false, message: '' });
     soundFx.configure(authedPlayer.settings.soundEnabled, authedPlayer.settings.soundVolume);
     await loadProgressionAndBoard();
@@ -366,12 +397,13 @@ export function App() {
     navigate('home');
   };
 
-  const handlePlayAction = (desiredView: AppView = 'lobby') => {
+  const handlePlayAction = (desiredView: AppView = 'lobby', customMsg?: string) => {
     if (player) {
       navigate(desiredView);
       return;
     }
     setPendingTargetView(desiredView);
+    setEntryPrompt(customMsg);
     setEntryModalOpen(true);
   };
 
@@ -403,12 +435,12 @@ export function App() {
 
   if (booting) {
     return (
-      <div className="min-h-screen bg-[#07090F] flex flex-col items-center justify-center text-slate-300">
-        <div className="h-10 w-10 rounded-xl border-2 border-[#E11D48] bg-[#10141F] flex items-center justify-center font-display font-bold text-white">
-          G
+      <div className="min-h-screen bg-[#060811] flex flex-col items-center justify-center text-slate-300">
+        <div className="h-11 w-11 rounded-xl border border-[#8B5CF6]/60 bg-gradient-to-br from-[#8B5CF6] to-[#38BDF8] flex items-center justify-center font-display text-lg font-bold text-white shadow-[0_0_24px_rgba(139,92,246,0.45)]">
+          P
         </div>
         <p className="mt-4 font-display text-sm tracking-widest uppercase text-slate-400">
-          Loading GAMEVERSE Arena...
+          Loading PLAYNOVA Universe...
         </p>
       </div>
     );
@@ -419,16 +451,22 @@ export function App() {
     ? Math.min(100, Math.round((player.currentLevelXp / Math.max(1, player.nextLevelXp)) * 100))
     : 0;
 
-  // Determine effective view safely: public views work without player; protected views show HomepageHero + entry prompt
   const isPublicView =
-    view === 'home' || view === 'leaderboard' || view === 'link_preview' || view === 'admin';
+    view === 'home' ||
+    view === 'tournaments' ||
+    view === 'leaderboard' ||
+    view === 'link_preview' ||
+    view === 'admin';
   const activeView: AppView = !player && !isPublicView ? 'home' : view;
+
+  const isGameDetailView = ALL_GAME_IDS.includes(activeView as GameId);
 
   const navItems: Array<{ id: AppView; label: string; requiresPlayer?: boolean }> = player
     ? [
         { id: 'lobby', label: 'Lobby' },
         { id: 'games', label: 'Games' },
         { id: 'multiplayer', label: 'Multiplayer' },
+        { id: 'tournaments', label: 'Tournaments' },
         { id: 'leaderboard', label: 'Leaderboard' },
         { id: 'link_preview', label: 'Link Preview' },
         { id: 'profile', label: 'Profile' },
@@ -437,18 +475,24 @@ export function App() {
         { id: 'home', label: 'Home' },
         { id: 'games', label: 'Games', requiresPlayer: true },
         { id: 'multiplayer', label: 'Multiplayer', requiresPlayer: true },
+        { id: 'tournaments', label: 'Tournaments' },
         { id: 'leaderboard', label: 'Leaderboard' },
         { id: 'link_preview', label: 'Link Preview' },
       ];
 
+  const filteredCatalog =
+    selectedCategory === 'All'
+      ? GAME_CATALOG
+      : GAME_CATALOG.filter((g) => g.categories.includes(selectedCategory));
+
   return (
     <div
-      className={`min-h-screen bg-[#07090F] text-[#F8FAFC] flex flex-col ${
+      className={`min-h-screen bg-[#060811] text-[#F8FAFC] flex flex-col ${
         player?.settings.reducedMotion ? 'reduce-motion' : ''
       }`}
     >
       {/* Top Bar Contract: 3 Clean Horizontal Zones */}
-      <header className="sticky top-0 z-40 border-b border-white/[0.08] bg-[#07090F]/95 backdrop-blur-md">
+      <header className="sticky top-0 z-40 border-b border-white/[0.08] bg-[#060811]/95 backdrop-blur-md">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-6 px-4 sm:px-6">
           {/* Zone 1: Brand */}
           <button
@@ -456,26 +500,24 @@ export function App() {
             onClick={() => navigate(player ? 'lobby' : 'home')}
             className="flex items-center gap-3 text-left shrink-0 cursor-pointer"
           >
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#E11D48] bg-[#10141F] font-display text-base font-bold text-white">
-              G
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#8B5CF6]/70 bg-gradient-to-br from-[#8B5CF6] to-[#38BDF8] font-display text-base font-bold text-white shadow-[0_0_16px_rgba(139,92,246,0.4)]">
+              P
             </div>
             <div className="leading-none">
               <span className="block font-display text-base font-bold tracking-tight text-white">
-                GAMEVERSE
+                PLAYNOVA
               </span>
-              <span className="hidden sm:block mt-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-[#F59E0B]">
-                Play · Compete · Earn
+              <span className="hidden sm:block mt-0.5 text-[10px] font-mono uppercase tracking-[0.18em] text-[#38BDF8]">
+                ENTER. COMPETE. CONQUER.
               </span>
             </div>
           </button>
 
           {/* Zone 2: Single-Line Navigation */}
-          <nav className="hidden md:flex items-center gap-6" aria-label="Main navigation">
+          <nav className="hidden lg:flex items-center gap-5" aria-label="Main navigation">
             {navItems.map((item) => {
               const isActive =
-                activeView === item.id ||
-                (item.id === 'games' &&
-                  (activeView === 'tictactoe' || activeView === 'rps' || activeView === 'guess_number'));
+                activeView === item.id || (item.id === 'games' && isGameDetailView);
               return (
                 <button
                   key={item.id}
@@ -493,7 +535,7 @@ export function App() {
                 >
                   {item.label}
                   {isActive && (
-                    <span className="absolute inset-x-0 -bottom-[21px] h-0.5 bg-[#E11D48]" />
+                    <span className="absolute inset-x-0 -bottom-[21px] h-0.5 bg-[#8B5CF6]" />
                   )}
                 </button>
               );
@@ -509,18 +551,18 @@ export function App() {
                     type="button"
                     onClick={() => void handleMarkNotificationsRead()}
                     aria-label="Notifications"
-                    className="relative flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-[#10141F] text-slate-300 transition hover:border-white/25 hover:text-white cursor-pointer"
+                    className="relative flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-[#0E1324] text-slate-300 transition hover:border-white/25 hover:text-white cursor-pointer"
                   >
                     <Bell className="h-4 w-4" />
                     {unreadCount > 0 && (
-                      <span className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[#E11D48] px-1 font-mono text-[10px] font-bold text-white">
+                      <span className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[#8B5CF6] px-1 font-mono text-[10px] font-bold text-white">
                         {unreadCount}
                       </span>
                     )}
                   </button>
 
                   {notifOpen && (
-                    <div className="absolute right-0 mt-2 w-80 rounded-xl border border-white/[0.12] bg-[#10141F] p-4 shadow-2xl z-50">
+                    <div className="absolute right-0 mt-2 w-80 rounded-xl border border-white/[0.12] bg-[#0E1324] p-4 shadow-2xl z-50">
                       <div className="flex items-center justify-between border-b border-white/[0.08] pb-2.5">
                         <span className="font-display text-sm font-bold text-white">Notifications</span>
                         <button
@@ -536,7 +578,7 @@ export function App() {
                           <p className="py-4 text-center text-xs text-slate-400">No notifications yet.</p>
                         ) : (
                           notifications.slice(0, 8).map((n) => (
-                            <div key={n.id} className="rounded-lg border border-white/[0.06] bg-[#0B0E17] p-2.5">
+                            <div key={n.id} className="rounded-lg border border-white/[0.06] bg-[#090D1A] p-2.5">
                               <p className="text-xs font-semibold text-white">{n.title}</p>
                               <p className="mt-0.5 text-[11px] text-slate-400">{n.message}</p>
                             </div>
@@ -550,15 +592,16 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => navigate('profile')}
-                  className="hidden sm:flex items-center gap-2 rounded-lg border border-white/[0.08] bg-[#10141F] px-2.5 py-1.5 text-xs font-medium text-white transition hover:border-white/25 cursor-pointer"
+                  className="hidden sm:flex items-center gap-2 rounded-lg border border-white/[0.08] bg-[#0E1324] px-2.5 py-1.5 text-xs font-medium text-white transition hover:border-white/25 cursor-pointer"
                 >
                   <PlayerAvatar
                     username={player.username}
                     profilePictureUrl={player.profilePictureUrl}
                     activeFrame={player.activeFrame}
+                    avatarConfig={player.avatarConfig}
                     size="sm"
                   />
-                  <span className="font-mono text-[#F59E0B] tabular-nums">
+                  <span className="font-mono text-[#F97316] tabular-nums">
                     {player.coins.toLocaleString()}c
                   </span>
                 </button>
@@ -566,7 +609,7 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => void handleLogout()}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#10141F] px-3.5 py-2 text-xs font-semibold text-slate-200 transition hover:border-[#E11D48] hover:text-white cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#0E1324] px-3.5 py-2 text-xs font-semibold text-slate-200 transition hover:border-[#8B5CF6] hover:text-white cursor-pointer"
                 >
                   <LogOut className="h-3.5 w-3.5" />
                   <span className="hidden sm:inline">Switch Name</span>
@@ -576,7 +619,7 @@ export function App() {
               <button
                 type="button"
                 onClick={() => handlePlayAction('lobby')}
-                className="inline-flex items-center gap-2 rounded-lg bg-[#E11D48] px-4 py-2 text-xs font-bold text-white transition hover:bg-[#BE123C] cursor-pointer"
+                className="inline-flex items-center gap-2 rounded-lg bg-[#8B5CF6] px-4 py-2 text-xs font-bold text-white transition hover:bg-[#7C3AED] shadow-[0_0_20px_rgba(139,92,246,0.35)] cursor-pointer"
               >
                 <Play className="h-3.5 w-3.5 fill-current" />
                 PLAY NOW
@@ -587,7 +630,7 @@ export function App() {
               type="button"
               onClick={() => setMobileNavOpen((v) => !v)}
               aria-label="Toggle Menu"
-              className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.1] bg-[#10141F] text-slate-200 md:hidden cursor-pointer"
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.1] bg-[#0E1324] text-slate-200 lg:hidden cursor-pointer"
             >
               {mobileNavOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
             </button>
@@ -596,7 +639,7 @@ export function App() {
 
         {/* Mobile Drawer */}
         {mobileNavOpen && (
-          <div className="border-t border-white/[0.08] bg-[#0B0E17] px-4 py-3 md:hidden">
+          <div className="border-t border-white/[0.08] bg-[#090D1A] px-4 py-3 lg:hidden">
             <div className="flex flex-col gap-1">
               {navItems.map((item) => (
                 <button
@@ -611,7 +654,7 @@ export function App() {
                   }}
                   className={`rounded-lg px-3 py-2 text-left text-sm font-medium ${
                     activeView === item.id
-                      ? 'bg-[#E11D48] text-white'
+                      ? 'bg-[#8B5CF6] text-white'
                       : 'text-slate-300 hover:bg-white/[0.05]'
                   }`}
                 >
@@ -623,20 +666,34 @@ export function App() {
         )}
       </header>
 
+      {/* Live Announcements Strip (when signed in or browsing Lobby) */}
+      {announcements.length > 0 && activeView === 'lobby' && (
+        <div className="mx-auto mt-4 w-full max-w-7xl px-4 sm:px-6">
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#38BDF8]/30 bg-[#0E1324] px-4 py-2.5 text-xs">
+            <div className="flex items-center gap-2 text-slate-200">
+              <Megaphone className="h-4 w-4 shrink-0 text-[#38BDF8]" />
+              <strong className="text-white">{announcements[0].title}:</strong>
+              <span className="text-slate-300">{announcements[0].message}</span>
+            </div>
+            <span className="font-mono text-[10px] uppercase text-[#38BDF8]">{announcements[0].level}</span>
+          </div>
+        </div>
+      )}
+
       {/* Incoming Live Multiplayer Invitations */}
       {player && rt.pendingInvites.length > 0 && (
         <div className="mx-auto mt-4 w-full max-w-7xl px-4 sm:px-6 space-y-2">
           {rt.pendingInvites.map((invite) => (
             <div
               key={`${invite.roomId}-${invite.createdAt}`}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-950/30 px-4 py-3 text-sm text-amber-100"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#F97316]/40 bg-[#F97316]/15 px-4 py-3 text-sm text-orange-100"
             >
               <div className="flex items-center gap-2.5">
-                <Users className="h-4 w-4 shrink-0 text-[#F59E0B]" />
+                <Users className="h-4 w-4 shrink-0 text-[#F97316]" />
                 <span>
                   <strong>{invite.fromUsername}</strong> invited you to a live{' '}
                   <strong className="capitalize">{invite.gameId.replace('_', ' ')}</strong> match (Room{' '}
-                  <code className="font-mono text-[#F59E0B]">{invite.roomCode}</code>)
+                  <code className="font-mono text-[#F97316]">{invite.roomCode}</code>)
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -694,6 +751,7 @@ export function App() {
               totalMatches: publicStats.totalMatches,
             }}
             topLeaders={topLeaders}
+            tournaments={tournaments}
             onPlayNow={(desired) => handlePlayAction(desired || 'lobby')}
             onNavigatePublic={(publicView) => navigate(publicView)}
           />
@@ -702,14 +760,14 @@ export function App() {
         {activeView === 'lobby' && player && (
           <div className="space-y-10">
             {/* Lobby Welcome & Mode Launcher */}
-            <section className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-[#10141F]">
+            <section className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0E1324]">
               <img
-                src={GAME_ASSETS.heroArena}
-                alt="GAMEVERSE strategy arena"
+                src={GAME_ASSETS.heroUniverse}
+                alt="PLAYNOVA multiplayer gaming universe"
                 referrerPolicy="no-referrer"
                 className="absolute inset-0 h-full w-full object-cover opacity-35"
               />
-              <div className="absolute inset-0 bg-gradient-to-r from-[#07090F] via-[#07090F]/88 to-[#07090F]/45" />
+              <div className="absolute inset-0 bg-gradient-to-r from-[#060811] via-[#060811]/90 to-[#060811]/45" />
 
               <div className="relative z-10 grid grid-cols-1 gap-8 p-6 sm:p-10 lg:grid-cols-12 lg:items-center">
                 <div className="lg:col-span-7 space-y-5">
@@ -718,11 +776,12 @@ export function App() {
                       username={player.username}
                       profilePictureUrl={player.profilePictureUrl}
                       activeFrame={player.activeFrame}
+                      avatarConfig={player.avatarConfig}
                       size="lg"
                     />
                     <div>
-                      <p className="font-mono text-xs uppercase tracking-[0.2em] text-[#F59E0B]">
-                        Arena Lobby · Ready to Play
+                      <p className="font-mono text-xs uppercase tracking-[0.2em] text-[#38BDF8]">
+                        PLAYNOVA Lobby · Ready to Compete
                       </p>
                       <h1 className="font-display text-3xl font-bold tracking-tight text-white sm:text-4xl">
                         {player.username}
@@ -731,50 +790,50 @@ export function App() {
                   </div>
 
                   <p className="max-w-xl text-sm leading-relaxed text-slate-300 sm:text-base">
-                    Challenge intelligent AI opponents, enter live human matchmaking rooms, or blend real players and AI bots together in Mixed Arenas. Every completed match grows your Level, Coins, and Leaderboard rank.
+                    Jump into 12 interactive arenas, battle intelligent AI rivals, enter real-time multiplayer rooms with live chat, or compete in single-elimination tournaments.
                   </p>
 
                   <div className="flex flex-wrap gap-3">
                     <button
                       type="button"
                       onClick={() => navigate('multiplayer')}
-                      className="inline-flex items-center gap-2 rounded-lg bg-[#E11D48] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#BE123C] cursor-pointer"
+                      className="inline-flex items-center gap-2 rounded-lg bg-[#8B5CF6] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#7C3AED] cursor-pointer"
                     >
                       <Users className="h-4 w-4" />
                       Multiplayer & Mixed Rooms ({rt.onlinePlayers.length} online)
                     </button>
                     <button
                       type="button"
-                      onClick={() => navigate('tictactoe')}
-                      className="inline-flex items-center gap-2 rounded-lg border border-white/[0.15] bg-[#10141F]/90 px-4 py-2.5 text-sm font-semibold text-white transition hover:border-[#E11D48] cursor-pointer"
+                      onClick={() => navigate('tournaments')}
+                      className="inline-flex items-center gap-2 rounded-lg border border-[#F97316]/50 bg-[#F97316]/15 px-4 py-2.5 text-sm font-semibold text-[#FDBA74] transition hover:bg-[#F97316]/25 cursor-pointer"
                     >
-                      <Play className="h-4 w-4 fill-current" />
-                      Tic-Tac-Toe
+                      <Trophy className="h-4 w-4" />
+                      Tournaments ({tournaments.length})
                     </button>
                     <button
                       type="button"
-                      onClick={() => navigate('rps')}
-                      className="inline-flex items-center gap-2 rounded-lg border border-white/[0.15] bg-[#10141F]/90 px-4 py-2.5 text-sm font-semibold text-white transition hover:border-[#F59E0B] cursor-pointer"
+                      onClick={() => navigate('chess')}
+                      className="inline-flex items-center gap-2 rounded-lg border border-white/[0.15] bg-[#0E1324]/90 px-4 py-2.5 text-sm font-semibold text-white transition hover:border-[#38BDF8] cursor-pointer"
                     >
-                      Rock-Paper-Scissors
+                      Chess
                     </button>
                     <button
                       type="button"
-                      onClick={() => navigate('guess_number')}
-                      className="inline-flex items-center gap-2 rounded-lg border border-white/[0.15] bg-[#10141F]/90 px-4 py-2.5 text-sm font-semibold text-white transition hover:border-emerald-500 cursor-pointer"
+                      onClick={() => navigate('connect_four')}
+                      className="inline-flex items-center gap-2 rounded-lg border border-white/[0.15] bg-[#0E1324]/90 px-4 py-2.5 text-sm font-semibold text-white transition hover:border-[#38BDF8] cursor-pointer"
                     >
-                      Guess the Number
+                      Connect Four
                     </button>
                   </div>
                 </div>
 
                 {/* Live Campaign Telemetry Panel */}
-                <div className="lg:col-span-5 rounded-xl border border-white/[0.1] bg-[#0B0E17]/90 p-5 space-y-4">
+                <div className="lg:col-span-5 rounded-xl border border-white/[0.1] bg-[#090D1A]/90 p-5 space-y-4">
                   <div className="flex items-center justify-between">
                     <span className="font-display text-base font-bold text-white">
-                      Level {player.level} Campaign
+                      Level {player.level} Contender
                     </span>
-                    <span className="font-mono text-xs text-[#F59E0B] tabular-nums">
+                    <span className="font-mono text-xs text-[#38BDF8] tabular-nums">
                       {player.xp.toLocaleString()} Total XP
                     </span>
                   </div>
@@ -785,27 +844,27 @@ export function App() {
                         {player.currentLevelXp} / {player.nextLevelXp} XP
                       </span>
                     </div>
-                    <div className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-[#151B2B]">
+                    <div className="mt-1.5 h-2.5 w-full overflow-hidden rounded-full bg-[#141A2E]">
                       <div
-                        className="h-full rounded-full bg-[#E11D48] transition-all duration-300"
+                        className="h-full rounded-full bg-gradient-to-r from-[#8B5CF6] to-[#38BDF8] transition-all duration-300"
                         style={{ width: `${xpPercent}%` }}
                       />
                     </div>
                   </div>
                   <div className="grid grid-cols-3 gap-3 pt-1 text-center">
-                    <div className="rounded-lg border border-white/[0.06] bg-[#10141F] p-3">
-                      <p className="text-[11px] text-slate-400">Game Coins</p>
-                      <p className="mt-1 font-mono text-lg font-bold text-[#F59E0B] tabular-nums">
+                    <div className="rounded-lg border border-white/[0.06] bg-[#0E1324] p-3">
+                      <p className="text-[11px] text-slate-400">Virtual Coins</p>
+                      <p className="mt-1 font-mono text-lg font-bold text-[#F97316] tabular-nums">
                         {player.coins}
                       </p>
                     </div>
-                    <div className="rounded-lg border border-white/[0.06] bg-[#10141F] p-3">
+                    <div className="rounded-lg border border-white/[0.06] bg-[#0E1324] p-3">
                       <p className="text-[11px] text-slate-400">Win Streak</p>
-                      <p className="mt-1 font-mono text-lg font-bold text-[#E11D48] tabular-nums">
+                      <p className="mt-1 font-mono text-lg font-bold text-[#8B5CF6] tabular-nums">
                         {player.currentStreak}
                       </p>
                     </div>
-                    <div className="rounded-lg border border-white/[0.06] bg-[#10141F] p-3">
+                    <div className="rounded-lg border border-white/[0.06] bg-[#0E1324] p-3">
                       <p className="text-[11px] text-slate-400">Live Rooms</p>
                       <p className="mt-1 font-mono text-lg font-bold text-emerald-400 tabular-nums">
                         {rt.publicRooms.length}
@@ -816,43 +875,98 @@ export function App() {
               </div>
             </section>
 
-            {/* Featured Games Grid */}
+            {/* Pinned Favourite Games */}
+            {player.favoriteGames.length > 0 && (
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="font-display text-lg font-bold text-white flex items-center gap-2">
+                    <Heart className="h-4 w-4 fill-[#F97316] text-[#F97316]" />
+                    Your Pinned Favourites
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => navigate('profile')}
+                    className="text-xs font-semibold text-[#38BDF8] hover:underline cursor-pointer"
+                  >
+                    Edit Favourites
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-2.5">
+                  {player.favoriteGames.map((fid) => {
+                    const g = GAME_CATALOG.find((item) => item.id === fid);
+                    if (!g) return null;
+                    return (
+                      <button
+                        key={fid}
+                        type="button"
+                        onClick={() => {
+                          soundFx.playSelect();
+                          navigate(fid);
+                        }}
+                        className="inline-flex items-center gap-2 rounded-xl border border-[#F97316]/35 bg-[#0E1324] px-4 py-2 text-xs font-semibold text-white hover:border-[#F97316] cursor-pointer"
+                      >
+                        <Play className="h-3.5 w-3.5 text-[#F97316] fill-current" />
+                        {g.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
+            {/* 12-Game Catalog with 7 Category Filters */}
             <section className="space-y-5">
-              <div className="flex items-end justify-between">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                 <div>
-                  <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#E11D48]">
-                    Solo AI · Online Humans · Mixed Arenas
+                  <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#38BDF8]">
+                    12 Interactive Arenas · Solo AI · Local 2P · Online Multiplayer
                   </p>
-                  <h2 className="mt-1 font-display text-2xl font-bold text-white">Select Your Arena</h2>
+                  <h2 className="mt-1 font-display text-2xl font-bold text-white">Select Your Game</h2>
                 </div>
                 <button
                   type="button"
                   onClick={() => navigate('games')}
                   className="inline-flex items-center gap-1 text-xs font-semibold text-slate-300 hover:text-white cursor-pointer"
                 >
-                  Rules & Breakdown <ChevronRight className="h-4 w-4" />
+                  Full Rules & Catalog <ChevronRight className="h-4 w-4" />
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
-                {GAME_CATALOG.map((game) => {
-                  const st = player.stats.byGame[game.id];
-                  const targetView: AppView = game.id;
+              <div className="flex flex-wrap gap-2">
+                {(['All', ...GAME_CATEGORIES] as const).map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setSelectedCategory(cat)}
+                    className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition cursor-pointer ${
+                      selectedCategory === cat
+                        ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white'
+                        : 'border-white/[0.08] bg-[#0E1324] text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+                {filteredCatalog.map((game) => {
+                  const st = player.stats.byGame[game.id] || { played: 0, wins: 0, bestScore: 0 };
                   return (
                     <article
                       key={game.id}
-                      className="group flex flex-col overflow-hidden rounded-xl border border-white/[0.08] bg-[#10141F] transition hover:border-white/25"
+                      className="group flex flex-col overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0E1324] transition hover:border-[#8B5CF6]/50"
                     >
-                      <div className="relative aspect-[4/3] w-full overflow-hidden bg-[#07090F]">
+                      <div className="relative aspect-[16/10] w-full overflow-hidden bg-[#060811]">
                         <img
-                          src={GAME_ART_MAP[game.id]}
+                          src={getGameArtwork(game.id)}
                           alt={`${game.name} arena illustration`}
                           referrerPolicy="no-referrer"
                           className="h-full w-full object-cover transition duration-500 group-hover:scale-105"
                         />
-                        <div className="absolute inset-0 bg-gradient-to-t from-[#10141F] via-transparent to-transparent" />
+                        <div className="absolute inset-0 bg-gradient-to-t from-[#0E1324] via-transparent to-transparent" />
                         <span
-                          className="absolute left-4 bottom-3 font-mono text-[11px] font-semibold uppercase tracking-wider"
+                          className="absolute left-4 bottom-2.5 font-mono text-[11px] font-semibold uppercase tracking-wider"
                           style={{ color: game.accentHex }}
                         >
                           {game.difficultySummary}
@@ -861,19 +975,22 @@ export function App() {
 
                       <div className="flex flex-1 flex-col justify-between p-5 space-y-4">
                         <div>
-                          <h3 className="font-display text-xl font-bold text-white">{game.name}</h3>
+                          <div className="flex items-center justify-between gap-2">
+                            <h3 className="font-display text-lg font-bold text-white">{game.name}</h3>
+                            <span className="font-mono text-[10px] text-slate-400">{game.estimatedTime}</span>
+                          </div>
                           <p className="mt-1 text-xs font-medium text-slate-400">{game.tagline}</p>
-                          <p className="mt-2.5 text-sm text-slate-300 leading-relaxed">
+                          <p className="mt-2 text-xs text-slate-300 leading-relaxed line-clamp-2">
                             {game.description}
                           </p>
                         </div>
 
-                        <div className="space-y-3 border-t border-white/[0.08] pt-4">
+                        <div className="space-y-3 border-t border-white/[0.08] pt-3.5">
                           <div className="flex items-center justify-between text-xs text-slate-400 tabular-nums">
                             <span>
                               Record: <strong className="text-white">{st.wins}W</strong> / {st.played}G
                             </span>
-                            <span className="font-mono text-[#F59E0B]">Best {st.bestScore} pts</span>
+                            <span className="font-mono text-[#F97316]">Best {st.bestScore} pts</span>
                           </div>
 
                           <div className="flex items-center gap-2">
@@ -881,26 +998,28 @@ export function App() {
                               type="button"
                               onClick={() => {
                                 soundFx.playSelect();
-                                navigate(targetView);
+                                navigate(game.id);
                               }}
-                              className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#E11D48] px-3 py-2.5 text-xs font-semibold text-white transition hover:bg-[#BE123C] cursor-pointer"
+                              className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#8B5CF6] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[#7C3AED] cursor-pointer"
                             >
                               <Gamepad2 className="h-4 w-4" />
-                              Play Solo / Local
+                              Play Now
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => handleOpenMultiplayerForGame(game.id)}
-                              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-3 py-2.5 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-900/40 cursor-pointer"
-                            >
-                              <Bot className="h-3.5 w-3.5" />
-                              Online
-                            </button>
+                            {game.supportsMultiplayer && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenMultiplayerForGame(game.id)}
+                                className="inline-flex items-center justify-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-3 py-2 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-900/40 cursor-pointer"
+                              >
+                                <Bot className="h-3.5 w-3.5" />
+                                Online
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => void handleCopyGameLink(game.id)}
-                              title="Copy shareable game link with Open Graph preview"
-                              className="rounded-lg border border-white/[0.1] bg-[#0B0E17] px-3 py-2.5 text-xs font-medium text-slate-300 transition hover:border-white/25 hover:text-white cursor-pointer"
+                              title="Copy shareable game link"
+                              className="rounded-lg border border-white/[0.1] bg-[#090D1A] px-2.5 py-2 text-xs font-medium text-slate-300 transition hover:border-white/25 hover:text-white cursor-pointer"
                             >
                               {copiedQuickLink === game.id ? 'Copied' : <Link2 className="h-4 w-4" />}
                             </button>
@@ -916,7 +1035,7 @@ export function App() {
             {/* Operational Workbench: Challenges, Leaderboard, Link Preview & Recent Matches */}
             <section className="grid grid-cols-1 gap-6 lg:grid-cols-12">
               <div className="lg:col-span-7 space-y-6">
-                <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6">
+                <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6">
                   <div className="flex items-center justify-between border-b border-white/[0.08] pb-4">
                     <div>
                       <h2 className="font-display text-lg font-bold text-white">Active Challenges</h2>
@@ -925,7 +1044,7 @@ export function App() {
                     <button
                       type="button"
                       onClick={() => navigate('profile')}
-                      className="text-xs font-semibold text-[#E11D48] hover:underline cursor-pointer"
+                      className="text-xs font-semibold text-[#8B5CF6] hover:underline cursor-pointer"
                     >
                       View All
                     </button>
@@ -935,10 +1054,10 @@ export function App() {
                     {challenges.slice(0, 4).map((c) => {
                       const pct = Math.min(100, Math.round((c.progress / Math.max(1, c.targetCount)) * 100));
                       return (
-                        <div key={c.id} className="rounded-lg border border-white/[0.06] bg-[#0B0E17] p-3.5">
+                        <div key={c.id} className="rounded-lg border border-white/[0.06] bg-[#090D1A] p-3.5">
                           <div className="flex items-center justify-between gap-3">
                             <div>
-                              <span className="font-mono text-[10px] uppercase tracking-wider text-[#F59E0B]">
+                              <span className="font-mono text-[10px] uppercase tracking-wider text-[#F97316]">
                                 {c.kind}
                               </span>
                               <h3 className="font-display text-sm font-bold text-white">{c.title}</h3>
@@ -951,7 +1070,7 @@ export function App() {
                           <div className="mt-2.5 flex items-center gap-3">
                             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-[#161C2C]">
                               <div
-                                className={`h-full rounded-full ${c.completed ? 'bg-emerald-500' : 'bg-[#E11D48]'}`}
+                                className={`h-full rounded-full ${c.completed ? 'bg-emerald-500' : 'bg-[#8B5CF6]'}`}
                                 style={{ width: `${pct}%` }}
                               />
                             </div>
@@ -965,14 +1084,14 @@ export function App() {
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6">
+                <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6">
                   <div className="flex items-center justify-between border-b border-white/[0.08] pb-4">
                     <h2 className="font-display text-lg font-bold text-white">Recently Played Matches</h2>
                     <span className="font-mono text-xs text-slate-400 tabular-nums">{matches.length} recent</span>
                   </div>
                   {matches.length === 0 ? (
                     <p className="mt-4 text-sm text-slate-400">
-                      You have not completed a match yet. Launch Tic-Tac-Toe, Rock-Paper-Scissors, Guess the Number, or join Multiplayer above.
+                      You have not completed a match yet. Pick any of the 12 PLAYNOVA arenas above to start building your record!
                     </p>
                   ) : (
                     <div className="mt-4 divide-y divide-white/[0.06]">
@@ -995,7 +1114,7 @@ export function App() {
                             </p>
                             <p className="truncate text-slate-400">{m.summary}</p>
                           </div>
-                          <span className="shrink-0 font-mono text-[#F59E0B] tabular-nums">
+                          <span className="shrink-0 font-mono text-[#F97316] tabular-nums">
                             +{m.scoreDelta} pts
                           </span>
                         </div>
@@ -1006,16 +1125,16 @@ export function App() {
               </div>
 
               <div className="lg:col-span-5 space-y-6">
-                <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6">
+                <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6">
                   <div className="flex items-center justify-between border-b border-white/[0.08] pb-4">
                     <div className="flex items-center gap-2">
-                      <Trophy className="h-4 w-4 text-[#F59E0B]" />
+                      <Trophy className="h-4 w-4 text-[#F97316]" />
                       <h2 className="font-display text-lg font-bold text-white">Leaderboard Top 5</h2>
                     </div>
                     <button
                       type="button"
                       onClick={() => navigate('leaderboard')}
-                      className="text-xs font-semibold text-[#E11D48] hover:underline cursor-pointer"
+                      className="text-xs font-semibold text-[#8B5CF6] hover:underline cursor-pointer"
                     >
                       Full Rankings
                     </button>
@@ -1027,8 +1146,8 @@ export function App() {
                         key={entry.playerId}
                         className={`flex items-center justify-between rounded-lg border px-3.5 py-2.5 ${
                           entry.isCurrentPlayer
-                            ? 'border-[#E11D48]/50 bg-[#E11D48]/10'
-                            : 'border-white/[0.06] bg-[#0B0E17]'
+                            ? 'border-[#8B5CF6]/50 bg-[#8B5CF6]/10'
+                            : 'border-white/[0.06] bg-[#090D1A]'
                         }`}
                       >
                         <div className="flex items-center gap-3 min-w-0">
@@ -1051,7 +1170,7 @@ export function App() {
                             </p>
                           </div>
                         </div>
-                        <span className="font-mono text-xs font-bold text-[#F59E0B] tabular-nums">
+                        <span className="font-mono text-xs font-bold text-[#F97316] tabular-nums">
                           {entry.points.toLocaleString()}
                         </span>
                       </div>
@@ -1059,19 +1178,19 @@ export function App() {
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6 space-y-4">
+                <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6 space-y-4">
                   <div className="flex items-center gap-2.5">
-                    <Globe className="h-5 w-5 text-[#E11D48]" />
+                    <Globe className="h-5 w-5 text-[#38BDF8]" />
                     <h2 className="font-display text-lg font-bold text-white">Link Preview & Sharing</h2>
                   </div>
                   <p className="text-sm text-slate-300 leading-relaxed">
-                    Generate live Open Graph & Twitter share previews for any GAMEVERSE game link or external URL, verify images, and share cleanly on WhatsApp, Telegram, Facebook, or X.
+                    Generate live Open Graph & Twitter share previews for any PLAYNOVA game link or external URL and share cleanly on WhatsApp, Telegram, Facebook, or X.
                   </p>
                   <div className="flex flex-wrap gap-2.5">
                     <button
                       type="button"
                       onClick={() => navigate('link_preview')}
-                      className="inline-flex items-center gap-2 rounded-lg bg-[#E11D48] px-4 py-2 text-xs font-semibold text-white hover:bg-[#BE123C] cursor-pointer"
+                      className="inline-flex items-center gap-2 rounded-lg bg-[#8B5CF6] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
                     >
                       <Link2 className="h-3.5 w-3.5" />
                       Open Link Preview Studio
@@ -1079,10 +1198,10 @@ export function App() {
                     <button
                       type="button"
                       onClick={() => navigate('profile')}
-                      className="inline-flex items-center gap-2 rounded-lg border border-white/[0.1] bg-[#0B0E17] px-4 py-2 text-xs font-semibold text-slate-200 hover:border-white/25 cursor-pointer"
+                      className="inline-flex items-center gap-2 rounded-lg border border-white/[0.1] bg-[#090D1A] px-4 py-2 text-xs font-semibold text-slate-200 hover:border-white/25 cursor-pointer"
                     >
-                      <Award className="h-3.5 w-3.5 text-[#F59E0B]" />
-                      Cosmetic Rewards ({player.coins}c)
+                      <Award className="h-3.5 w-3.5 text-[#F97316]" />
+                      Rewards & Wallet ({player.coins}c)
                     </button>
                   </div>
                 </div>
@@ -1093,27 +1212,45 @@ export function App() {
 
         {activeView === 'games' && player && (
           <div className="space-y-8">
-            <div className="border-b border-white/[0.08] pb-6">
-              <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#E11D48]">
-                Three Complete Arenas
-              </p>
-              <h1 className="mt-1 font-display text-3xl font-bold text-white">GAMEVERSE Arcade Catalog</h1>
-              <p className="mt-2 max-w-2xl text-sm text-slate-400">
-                Launch Solo vs AI, Local 2-Player, Online vs Humans, or Mixed AI + Human matches on any game below.
-              </p>
+            <div className="border-b border-white/[0.08] pb-6 space-y-4">
+              <div>
+                <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#38BDF8]">
+                  Complete 12-Game Collection
+                </p>
+                <h1 className="mt-1 font-display text-3xl font-bold text-white">PLAYNOVA Arcade Catalog</h1>
+                <p className="mt-2 max-w-2xl text-sm text-slate-400">
+                  Filter by genre below and launch Solo vs AI, Local 2-Player, Online vs Humans, or Mixed Arenas.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {(['All', ...GAME_CATEGORIES] as const).map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setSelectedCategory(cat)}
+                    className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition cursor-pointer ${
+                      selectedCategory === cat
+                        ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white'
+                        : 'border-white/[0.08] bg-[#0E1324] text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div className="space-y-6">
-              {GAME_CATALOG.map((game) => {
-                const st = player.stats.byGame[game.id];
+              {filteredCatalog.map((game) => {
+                const st = player.stats.byGame[game.id] || { played: 0, wins: 0, bestScore: 0 };
                 return (
                   <div
                     key={game.id}
-                    className="grid grid-cols-1 overflow-hidden rounded-xl border border-white/[0.08] bg-[#10141F] lg:grid-cols-12"
+                    className="grid grid-cols-1 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0E1324] lg:grid-cols-12"
                   >
-                    <div className="lg:col-span-4 aspect-[4/3] lg:aspect-auto bg-[#07090F]">
+                    <div className="lg:col-span-4 aspect-[4/3] lg:aspect-auto bg-[#060811]">
                       <img
-                        src={GAME_ART_MAP[game.id]}
+                        src={getGameArtwork(game.id)}
                         alt={game.name}
                         referrerPolicy="no-referrer"
                         className="h-full w-full object-cover"
@@ -1123,12 +1260,12 @@ export function App() {
                       <div>
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <h2 className="font-display text-2xl font-bold text-white">{game.name}</h2>
-                          <span className="font-mono text-xs text-[#F59E0B]">{game.difficultySummary}</span>
+                          <span className="font-mono text-xs text-[#F97316]">{game.difficultySummary}</span>
                         </div>
                         <p className="mt-2 text-sm text-slate-300">{game.description}</p>
                         <ul className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 text-xs text-slate-400">
                           {game.rules.map((r) => (
-                            <li key={r} className="rounded-lg border border-white/[0.06] bg-[#0B0E17] px-3 py-2">
+                            <li key={r} className="rounded-lg border border-white/[0.06] bg-[#090D1A] px-3 py-2">
                               {r}
                             </li>
                           ))}
@@ -1138,25 +1275,27 @@ export function App() {
                         <div className="flex gap-5 font-mono text-xs text-slate-300 tabular-nums">
                           <span>Played: {st.played}</span>
                           <span className="text-emerald-400">Wins: {st.wins}</span>
-                          <span className="text-[#F59E0B]">Best Score: {st.bestScore}</span>
+                          <span className="text-[#F97316]">Best Score: {st.bestScore}</span>
                         </div>
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="button"
                             onClick={() => navigate(game.id)}
-                            className="inline-flex items-center gap-2 rounded-lg bg-[#E11D48] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#BE123C] cursor-pointer"
+                            className="inline-flex items-center gap-2 rounded-lg bg-[#8B5CF6] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
                           >
                             <Play className="h-3.5 w-3.5 fill-current" />
-                            Solo / Local
+                            Play Solo / Local
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => handleOpenMultiplayerForGame(game.id)}
-                            className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-4 py-2.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-900/40 cursor-pointer"
-                          >
-                            <Users className="h-3.5 w-3.5" />
-                            Online / Mixed Arena
-                          </button>
+                          {game.supportsMultiplayer && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenMultiplayerForGame(game.id)}
+                              className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-4 py-2.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-900/40 cursor-pointer"
+                            >
+                              <Users className="h-3.5 w-3.5" />
+                              Online / Mixed Arena
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1173,6 +1312,17 @@ export function App() {
             defaultGame={multiplayerGame}
             onRefreshProfile={() => void refreshPlayerProfile()}
             onSwitchToSoloAi={(gameId) => navigate(gameId)}
+          />
+        )}
+
+        {activeView === 'tournaments' && (
+          <TournamentsSection
+            player={player}
+            onRequirePlayer={(msg) => handlePlayAction('tournaments', msg)}
+            onPlayerUpdated={(p) => {
+              setPlayer(p);
+              void loadProgressionAndBoard();
+            }}
           />
         )}
 
@@ -1206,6 +1356,89 @@ export function App() {
           />
         )}
 
+        {activeView === 'connect_four' && player && (
+          <ConnectFourGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onOpenMultiplayer={() => handleOpenMultiplayerForGame('connect_four')}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'chess' && player && (
+          <ChessGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onOpenMultiplayer={() => handleOpenMultiplayerForGame('chess')}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'memory_match' && player && (
+          <MemoryMatchGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'word_battle' && player && (
+          <WordBattleGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'trivia_challenge' && player && (
+          <TriviaChallengeGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'sudoku' && player && (
+          <SudokuGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'quick_math' && player && (
+          <QuickMathGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'reaction_test' && player && (
+          <ReactionTestGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'pattern_recognition' && player && (
+          <PatternRecognitionGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
         {activeView === 'leaderboard' && <LeaderboardSection />}
 
         {activeView === 'link_preview' && (
@@ -1228,16 +1461,19 @@ export function App() {
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-white/[0.08] bg-[#0B0E17] py-6">
+      <footer className="border-t border-white/[0.08] bg-[#090D1A] py-6">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <div className="flex flex-wrap items-center gap-4">
-            <span className="font-display font-bold text-white">GAMEVERSE</span>
-            <span>Play. Compete. Earn. Conquer.</span>
+            <span className="font-display font-bold text-white">PLAYNOVA</span>
+            <span>ENTER. COMPETE. CONQUER.</span>
             <span className="inline-flex items-center gap-1 text-slate-500">
-              <Coins className="h-3.5 w-3.5 text-[#F59E0B]" /> Virtual reward points only
+              <Coins className="h-3.5 w-3.5 text-[#F97316]" /> Virtual reward points only
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-4">
+            <button type="button" onClick={() => navigate('tournaments')} className="hover:text-white cursor-pointer">
+              Tournaments
+            </button>
             <button type="button" onClick={() => navigate('link_preview')} className="hover:text-white cursor-pointer">
               Link Preview
             </button>
@@ -1265,14 +1501,11 @@ export function App() {
       {/* Username-Only Entry Modal */}
       {entryModalOpen && (
         <UsernameEntryModal
-          initialPrompt={
-            pendingRoomCode
-              ? `Choose a unique username to join live Multiplayer Room ${pendingRoomCode}.`
-              : undefined
-          }
+          initialPrompt={entryPrompt}
           onEntered={(enteredPlayer, token) => void handleAuthenticated(enteredPlayer, token)}
           onClose={() => {
             setEntryModalOpen(false);
+            setEntryPrompt(undefined);
             setPendingTargetView(null);
             setPendingRoomCode(null);
           }}

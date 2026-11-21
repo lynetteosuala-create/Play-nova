@@ -135,15 +135,15 @@ export function UsernameEntryModal({ onEntered, onClose, initialPrompt }: Userna
       soundFx.playWin();
       onEntered(res.player, res.token);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not enter GAMEVERSE.');
+      setError(err instanceof Error ? err.message : 'Could not enter PLAYNOVA.');
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
-      <div className="relative w-full max-w-md rounded-2xl border border-white/[0.12] bg-[#10141F] p-7 shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#04060D]/85 p-4 backdrop-blur-md">
+      <div className="relative w-full max-w-md rounded-2xl border border-[#8B5CF6]/30 bg-[#0E1324] p-7 shadow-[0_24px_80px_rgba(139,92,246,0.22)]">
         {onClose && (
           <button
             type="button"
@@ -157,26 +157,26 @@ export function UsernameEntryModal({ onEntered, onClose, initialPrompt }: Userna
 
         <div className="space-y-5">
           <div>
-            <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#E11D48]">
-              GAMEVERSE Arena Entry
+            <p className="text-xs font-mono uppercase tracking-[0.22em] text-[#38BDF8]">
+              PLAYNOVA · ENTER. COMPETE. CONQUER.
             </p>
-            <h2 className="mt-1 font-display text-2xl font-bold text-white">
+            <h2 className="mt-1.5 font-display text-2xl font-bold text-white">
               What should we call you?
             </h2>
             <p className="mt-1 text-xs text-slate-400">
-              {initialPrompt || 'Enter a username to jump straight into the gaming lobby.'}
+              {initialPrompt || 'Pick your arena username and jump straight in — no email or password required.'}
             </p>
           </div>
 
           <form onSubmit={(e) => void handleEnterSubmit(e)} className="space-y-4">
             <div>
-              <label htmlFor="gv-entry-username" className="block text-xs font-medium text-slate-300">
+              <label htmlFor="pn-entry-username" className="block text-xs font-medium text-slate-300">
                 Username
               </label>
               <div className="relative mt-1.5">
                 <UserCheck className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                 <input
-                  id="gv-entry-username"
+                  id="pn-entry-username"
                   type="text"
                   required
                   minLength={2}
@@ -184,8 +184,8 @@ export function UsernameEntryModal({ onEntered, onClose, initialPrompt }: Userna
                   autoFocus
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="Enter your player name"
-                  className="w-full rounded-xl border border-white/[0.12] bg-[#07090F] py-3 pl-10 pr-10 text-sm text-white placeholder-slate-500 focus:border-[#E11D48] focus:outline-none"
+                  placeholder="Choose your player name"
+                  className="w-full rounded-xl border border-white/[0.12] bg-[#060811] py-3 pl-10 pr-10 text-sm text-white placeholder-slate-500 focus:border-[#8B5CF6] focus:outline-none"
                 />
                 {!showRestoreKey && username.trim().length >= 2 && (
                   <span className="absolute right-3 top-1/2 -translate-y-1/2">
@@ -210,11 +210,11 @@ export function UsernameEntryModal({ onEntered, onClose, initialPrompt }: Userna
                   }`}
                 >
                   {availability.checking
-                    ? 'Checking name...'
+                    ? 'Checking handle...'
                     : availability.hasDeviceKey
-                    ? 'Welcome back! Saved profile found on this device.'
+                    ? 'Welcome back! Saved profile found on this browser.'
                     : availability.available
-                    ? 'Ready to play!'
+                    ? 'Handle available — ready for launch!'
                     : availability.reason || 'Choose a valid username.'}
                 </p>
               )}
@@ -222,19 +222,19 @@ export function UsernameEntryModal({ onEntered, onClose, initialPrompt }: Userna
 
             {showRestoreKey && (
               <div>
-                <label htmlFor="gv-recovery-key" className="block text-xs font-medium text-slate-300">
+                <label htmlFor="pn-recovery-key" className="block text-xs font-medium text-slate-300">
                   Progress Save Key (optional cross-device restore)
                 </label>
                 <div className="relative mt-1.5">
                   <KeyRound className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                   <input
-                    id="gv-recovery-key"
+                    id="pn-recovery-key"
                     type="text"
                     required
                     value={recoveryKey}
                     onChange={(e) => setRecoveryKey(e.target.value.toUpperCase())}
-                    placeholder="GV-XXXXXXXX"
-                    className="w-full rounded-xl border border-white/[0.12] bg-[#07090F] py-2.5 pl-10 pr-3.5 font-mono text-sm text-white placeholder-slate-500 focus:border-[#E11D48] focus:outline-none"
+                    placeholder="PN-XXXXXXXX"
+                    className="w-full rounded-xl border border-white/[0.12] bg-[#060811] py-2.5 pl-10 pr-3.5 font-mono text-sm text-white placeholder-slate-500 focus:border-[#8B5CF6] focus:outline-none"
                   />
                 </div>
               </div>
@@ -253,15 +253,15 @@ export function UsernameEntryModal({ onEntered, onClose, initialPrompt }: Userna
                 username.trim().length < 2 ||
                 (!showRestoreKey && !availability.checking && !availability.available && !availability.hasDeviceKey)
               }
-              className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#E11D48] px-4 py-3 text-sm font-bold tracking-wide text-white transition hover:bg-[#BE123C] disabled:opacity-50 cursor-pointer"
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-[#6366F1] px-4 py-3 text-sm font-bold tracking-wide text-white shadow-[0_8px_28px_rgba(139,92,246,0.35)] transition hover:brightness-110 disabled:opacity-50 cursor-pointer"
             >
-              {busy ? 'ENTERING LOBBY...' : 'CONTINUE'}
+              {busy ? 'ENTERING ARENA...' : 'START PLAYING'}
               <ArrowRight className="h-4 w-4" />
             </button>
           </form>
 
           <div className="flex items-center justify-between border-t border-white/[0.06] pt-3 text-[11px] text-slate-400">
-            <span>No email or password needed.</span>
+            <span>Username only · Instant access</span>
             <button
               type="button"
               onClick={() => {
@@ -270,7 +270,7 @@ export function UsernameEntryModal({ onEntered, onClose, initialPrompt }: Userna
               }}
               className="font-medium text-slate-300 hover:text-white underline cursor-pointer"
             >
-              {showRestoreKey ? 'Back to quick entry' : 'Restore with Save Key'}
+              {showRestoreKey ? 'Back to username entry' : 'Restore via Save Key'}
             </button>
           </div>
         </div>

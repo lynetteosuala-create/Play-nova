@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { ArrowLeft, Cpu, Flame, Hand, RotateCcw, Scissors, Shield, Users } from 'lucide-react';
+import { ArrowLeft, Cpu, Flame, Hand, RotateCcw, Scissors, Shield, Trophy, Users } from 'lucide-react';
 import { GAME_CATALOG } from '../game/catalog.ts';
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../types.ts';
 import { apiFetch } from '../utils/api.ts';
@@ -38,6 +38,10 @@ export function RockPaperScissorsGame({
   const catalog = GAME_CATALOG[1];
   const [mode, setMode] = useState<'vs_ai' | 'local_2p'>('vs_ai');
   const [difficulty, setDifficulty] = useState<DifficultyLevel>('medium');
+  const [seriesTarget, setSeriesTarget] = useState<1 | 2 | 3>(2); // 1 = Single, 2 = Best of 3, 3 = Best of 5
+  const [seriesScore, setSeriesScore] = useState({ p1: 0, opp: 0 });
+  const [seriesChampion, setSeriesChampion] = useState<'player' | 'opponent' | null>(null);
+
   const [p1Choice, setP1Choice] = useState<RpsMove | null>(null);
   const [p2Choice, setP2Choice] = useState<RpsMove | null>(null);
   const [recentPlayerMoves, setRecentPlayerMoves] = useState<RpsMove[]>([]);
@@ -58,15 +62,24 @@ export function RockPaperScissorsGame({
     soundFx.playTick();
     const timer = window.setTimeout(() => {
       setCountdown((c) => (c !== null ? c - 1 : null));
-    }, 320);
+    }, 280);
     return () => window.clearTimeout(timer);
   }, [countdown]);
+
+  const resetSeries = () => {
+    soundFx.playClick();
+    setResult(null);
+    setP1Choice(null);
+    setP2Choice(null);
+    setSeriesScore({ p1: 0, opp: 0 });
+    setSeriesChampion(null);
+  };
 
   const executeResolution = async (move1: RpsMove, move2?: RpsMove) => {
     setBusy(true);
     setResult(null);
     setCountdown(3);
-    await new Promise((r) => setTimeout(r, 980));
+    await new Promise((r) => setTimeout(r, 860));
     setCountdown(null);
 
     try {
@@ -98,6 +111,16 @@ export function RockPaperScissorsGame({
         rewards: res.rewards,
       });
 
+      const nextP1 = seriesScore.p1 + (res.outcome === 'win' ? 1 : 0);
+      const nextOpp = seriesScore.opp + (res.outcome === 'loss' ? 1 : 0);
+      setSeriesScore({ p1: nextP1, opp: nextOpp });
+
+      if (nextP1 >= seriesTarget) {
+        setSeriesChampion('player');
+      } else if (nextOpp >= seriesTarget) {
+        setSeriesChampion('opponent');
+      }
+
       if (res.outcome === 'win') {
         soundFx.playWin();
         setSessionStats((s) => ({ ...s, wins: s.wins + 1, streak: s.streak + 1 }));
@@ -118,7 +141,7 @@ export function RockPaperScissorsGame({
   };
 
   const handleSelectMove = (move: RpsMove) => {
-    if (busy || countdown !== null) return;
+    if (busy || countdown !== null || seriesChampion) return;
     soundFx.playSelect();
 
     if (mode === 'vs_ai') {
@@ -135,26 +158,19 @@ export function RockPaperScissorsGame({
     }
   };
 
-  const resetRound = () => {
-    soundFx.playClick();
-    setResult(null);
-    setP1Choice(null);
-    setP2Choice(null);
-  };
-
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/[0.08] pb-4">
         <div>
           <button
             type="button"
             onClick={onBack}
-            className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white"
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white cursor-pointer"
           >
             <ArrowLeft className="h-3.5 w-3.5" /> Back to Hub
           </button>
           <h1 className="mt-1 font-display text-2xl font-bold text-white sm:text-3xl">
-            Rock-Paper-Scissors Arena
+            Rock Paper Scissors Arena
           </h1>
         </div>
         <div className="flex flex-wrap items-center gap-4 font-mono text-xs tabular-nums text-slate-300">
@@ -165,7 +181,7 @@ export function RockPaperScissorsGame({
             <button
               type="button"
               onClick={onOpenMultiplayer}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-3 py-1.5 font-sans text-xs font-semibold text-emerald-300 transition hover:bg-emerald-900/40 cursor-pointer"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#38BDF8]/40 bg-[#38BDF8]/10 px-3 py-1.5 font-sans text-xs font-semibold text-[#38BDF8] transition hover:bg-[#38BDF8]/20 cursor-pointer"
             >
               <Users className="h-3.5 w-3.5" />
               Play Online / Mixed Arena
@@ -177,19 +193,19 @@ export function RockPaperScissorsGame({
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="space-y-5 lg:col-span-7">
           {/* Rules & Mode Bar */}
-          <div className="rounded-2xl border border-slate-800 bg-[#10141F] p-5 space-y-4">
+          <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex gap-2">
                 <button
                   type="button"
                   onClick={() => {
                     setMode('vs_ai');
-                    resetRound();
+                    resetSeries();
                   }}
-                  className={`inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-semibold ${
+                  className={`inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-semibold cursor-pointer ${
                     mode === 'vs_ai'
-                      ? 'border-amber-500 bg-amber-600/20 text-white'
-                      : 'border-slate-700 bg-[#07090F] text-slate-300'
+                      ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white'
+                      : 'border-slate-700 bg-[#060811] text-slate-300'
                   }`}
                 >
                   <Cpu className="h-3.5 w-3.5" /> vs AI
@@ -198,16 +214,43 @@ export function RockPaperScissorsGame({
                   type="button"
                   onClick={() => {
                     setMode('local_2p');
-                    resetRound();
+                    resetSeries();
                   }}
-                  className={`inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-semibold ${
+                  className={`inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-semibold cursor-pointer ${
                     mode === 'local_2p'
-                      ? 'border-amber-500 bg-amber-600/20 text-white'
-                      : 'border-slate-700 bg-[#07090F] text-slate-300'
+                      ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white'
+                      : 'border-slate-700 bg-[#060811] text-slate-300'
                   }`}
                 >
                   <Users className="h-3.5 w-3.5" /> 2-Player Local
                 </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {(
+                  [
+                    { val: 1, label: 'Single' },
+                    { val: 2, label: 'Best of 3' },
+                    { val: 3, label: 'Best of 5' },
+                  ] as const
+                ).map((s) => (
+                  <button
+                    key={s.val}
+                    type="button"
+                    onClick={() => {
+                      setSeriesTarget(s.val);
+                      setSeriesScore({ p1: 0, opp: 0 });
+                      setSeriesChampion(null);
+                    }}
+                    className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold cursor-pointer ${
+                      seriesTarget === s.val
+                        ? 'border-[#F97316] bg-[#F97316]/20 text-[#FDBA74]'
+                        : 'border-slate-700 bg-[#060811] text-slate-400'
+                    }`}
+                  >
+                    {s.label}
+                  </button>
+                ))}
               </div>
 
               {mode === 'vs_ai' && (
@@ -217,10 +260,10 @@ export function RockPaperScissorsGame({
                       key={d}
                       type="button"
                       onClick={() => setDifficulty(d)}
-                      className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold capitalize ${
+                      className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold capitalize cursor-pointer ${
                         difficulty === d
-                          ? 'border-rose-500 bg-rose-600/20 text-white'
-                          : 'border-slate-700 bg-[#07090F] text-slate-400'
+                          ? 'border-[#38BDF8] bg-[#38BDF8]/20 text-white'
+                          : 'border-slate-700 bg-[#060811] text-slate-400'
                       }`}
                     >
                       {d}
@@ -230,7 +273,19 @@ export function RockPaperScissorsGame({
               )}
             </div>
 
-            <div className="flex flex-wrap gap-4 border-t border-slate-800 pt-3 text-xs text-slate-300">
+            {seriesTarget > 1 && (
+              <div className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-[#060811] px-4 py-2.5 text-xs">
+                <span className="text-slate-300 font-medium">
+                  Series Score (First to {seriesTarget} wins)
+                </span>
+                <span className="font-mono font-bold text-white tabular-nums">
+                  {mode === 'local_2p' ? 'P1' : 'You'} {seriesScore.p1} — {seriesScore.opp}{' '}
+                  {mode === 'local_2p' ? 'P2' : 'AI'}
+                </span>
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-4 border-t border-white/[0.06] pt-3 text-xs text-slate-300">
               {catalog.rules.slice(0, 3).map((r) => (
                 <span key={r}>• {r}</span>
               ))}
@@ -238,14 +293,14 @@ export function RockPaperScissorsGame({
           </div>
 
           {/* Duel Stage */}
-          <div className="rounded-2xl border border-slate-800 bg-[#10141F] p-6 space-y-6">
+          <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6 space-y-6">
             <div className="text-center">
               {countdown !== null ? (
                 <motion.div
                   key={countdown}
                   initial={{ scale: 0.7, opacity: 0 }}
                   animate={{ scale: 1.15, opacity: 1 }}
-                  className="py-8 font-display text-5xl font-bold text-amber-400"
+                  className="py-8 font-display text-5xl font-bold text-[#F97316]"
                 >
                   {countdown > 0 ? countdown : 'REVEAL!'}
                 </motion.div>
@@ -255,12 +310,12 @@ export function RockPaperScissorsGame({
                   animate={{ opacity: 1, y: 0 }}
                   className="space-y-4"
                 >
-                  <div className="grid grid-cols-3 items-center gap-4 rounded-xl border border-slate-800 bg-[#07090F] p-5">
+                  <div className="grid grid-cols-3 items-center gap-4 rounded-xl border border-white/[0.08] bg-[#060811] p-5">
                     <div className="flex flex-col items-center">
                       <span className="text-xs text-slate-400">
                         {mode === 'local_2p' ? 'Player 1' : 'You'}
                       </span>
-                      <div className="mt-2 flex h-16 w-16 items-center justify-center rounded-2xl border border-slate-700 bg-[#10141F] text-amber-400">
+                      <div className="mt-2 flex h-16 w-16 items-center justify-center rounded-2xl border border-[#38BDF8]/40 bg-[#0E1324] text-[#38BDF8]">
                         <MoveGlyph move={result.playerMove} />
                       </div>
                       <span className="mt-2 text-sm font-semibold capitalize text-white">
@@ -274,7 +329,7 @@ export function RockPaperScissorsGame({
                       <span className="text-xs text-slate-400">
                         {mode === 'local_2p' ? 'Player 2' : `AI (${difficulty})`}
                       </span>
-                      <div className="mt-2 flex h-16 w-16 items-center justify-center rounded-2xl border border-slate-700 bg-[#10141F] text-rose-400">
+                      <div className="mt-2 flex h-16 w-16 items-center justify-center rounded-2xl border border-[#F97316]/40 bg-[#0E1324] text-[#F97316]">
                         <MoveGlyph move={result.opponentMove} />
                       </div>
                       <span className="mt-2 text-sm font-semibold capitalize text-white">
@@ -283,14 +338,27 @@ export function RockPaperScissorsGame({
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-700 bg-[#07090F] px-4 py-3">
+                  {seriesChampion && (
+                    <div className="flex items-center justify-center gap-2 rounded-xl border border-[#8B5CF6]/40 bg-[#8B5CF6]/15 px-4 py-3 text-sm font-bold text-white">
+                      <Trophy className="h-4 w-4 text-[#F97316]" />
+                      {seriesChampion === 'player'
+                        ? mode === 'local_2p'
+                          ? 'Player 1 wins the Series!'
+                          : 'Series Champion — Victory!'
+                        : mode === 'local_2p'
+                        ? 'Player 2 wins the Series!'
+                        : 'AI wins the Series!'}
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-[#060811] px-4 py-3">
                     <div>
                       <p
                         className={`font-display text-xl font-bold ${
                           result.outcome === 'win'
                             ? 'text-emerald-400'
                             : result.outcome === 'draw'
-                            ? 'text-amber-400'
+                            ? 'text-[#F97316]'
                             : 'text-rose-400'
                         }`}
                       >
@@ -310,10 +378,17 @@ export function RockPaperScissorsGame({
                     </div>
                     <button
                       type="button"
-                      onClick={resetRound}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-500"
+                      onClick={() => {
+                        if (seriesChampion) {
+                          resetSeries();
+                        } else {
+                          soundFx.playClick();
+                          setResult(null);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-[#8B5CF6] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
                     >
-                      <RotateCcw className="h-3.5 w-3.5" /> Rematch
+                      <RotateCcw className="h-3.5 w-3.5" /> {seriesChampion ? 'New Series' : 'Next Round'}
                     </button>
                   </div>
                 </motion.div>
@@ -324,12 +399,12 @@ export function RockPaperScissorsGame({
                       ? !p1Choice
                         ? 'Player 1: Select Your Secret Move'
                         : 'Player 2: Select Your Secret Move'
-                      : 'Choose Your Weapon'}
+                      : 'Choose Your Move'}
                   </p>
                   <p className="mt-1 text-xs text-slate-400">
                     {mode === 'local_2p' && p1Choice
                       ? 'Player 1 move is locked in hidden.'
-                      : 'A 3-second countdown plays before both moves reveal.'}
+                      : 'Rapid reveal countdown executes immediately upon selection.'}
                   </p>
                 </div>
               )}
@@ -341,11 +416,11 @@ export function RockPaperScissorsGame({
                 <button
                   key={m.id}
                   type="button"
-                  disabled={busy || countdown !== null}
+                  disabled={busy || countdown !== null || Boolean(seriesChampion)}
                   onClick={() => handleSelectMove(m.id)}
-                  className="group flex flex-col items-center rounded-2xl border border-slate-700 bg-[#07090F] p-5 transition hover:border-amber-500 hover:bg-[#141927] disabled:opacity-50"
+                  className="group flex flex-col items-center rounded-2xl border border-slate-700 bg-[#060811] p-5 transition hover:border-[#8B5CF6] hover:bg-[#131932] disabled:opacity-50 cursor-pointer"
                 >
-                  <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-800 bg-[#10141F] text-amber-400 transition group-hover:scale-105">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-800 bg-[#0E1324] text-[#38BDF8] transition group-hover:scale-105 group-hover:text-[#F97316]">
                     <MoveGlyph move={m.id} className="h-7 w-7" />
                   </div>
                   <span className="mt-3 font-display text-lg font-bold text-white">{m.label}</span>
@@ -358,30 +433,30 @@ export function RockPaperScissorsGame({
 
         {/* Right Stats & Streak */}
         <div className="space-y-5 lg:col-span-5">
-          <div className="rounded-2xl border border-slate-800 bg-[#10141F] p-5 space-y-4">
+          <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-5 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="font-display text-lg font-bold text-white">Session Telemetry</h3>
-              <span className="inline-flex items-center gap-1 font-mono text-xs text-amber-400">
+              <span className="inline-flex items-center gap-1 font-mono text-xs text-[#F97316]">
                 <Flame className="h-3.5 w-3.5" /> Streak: {sessionStats.streak}
               </span>
             </div>
             <div className="grid grid-cols-3 gap-3 text-center font-mono">
-              <div className="rounded-xl border border-slate-800 bg-[#07090F] p-3">
+              <div className="rounded-xl border border-white/[0.06] bg-[#060811] p-3">
                 <p className="text-[11px] text-slate-400">Wins</p>
                 <p className="mt-1 text-xl font-bold tabular-nums text-emerald-400">{sessionStats.wins}</p>
               </div>
-              <div className="rounded-xl border border-slate-800 bg-[#07090F] p-3">
+              <div className="rounded-xl border border-white/[0.06] bg-[#060811] p-3">
                 <p className="text-[11px] text-slate-400">Draws</p>
-                <p className="mt-1 text-xl font-bold tabular-nums text-amber-400">{sessionStats.draws}</p>
+                <p className="mt-1 text-xl font-bold tabular-nums text-[#F97316]">{sessionStats.draws}</p>
               </div>
-              <div className="rounded-xl border border-slate-800 bg-[#07090F] p-3">
+              <div className="rounded-xl border border-white/[0.06] bg-[#060811] p-3">
                 <p className="text-[11px] text-slate-400">Losses</p>
                 <p className="mt-1 text-xl font-bold tabular-nums text-rose-400">{sessionStats.losses}</p>
               </div>
             </div>
           </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-[#10141F] p-5">
+          <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-5">
             <h3 className="font-display text-lg font-bold text-white">Recent Rounds</h3>
             {rpsHistory.length === 0 ? (
               <p className="mt-3 text-xs text-slate-400">Play a round to start tracking your streaks.</p>
@@ -390,10 +465,10 @@ export function RockPaperScissorsGame({
                 {rpsHistory.slice(0, 8).map((m) => (
                   <div
                     key={m.id}
-                    className="flex items-center justify-between gap-2 rounded-xl border border-slate-800 bg-[#07090F] px-3.5 py-2.5 text-xs"
+                    className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-[#060811] px-3.5 py-2.5 text-xs"
                   >
                     <span className="font-medium text-slate-200">{m.summary}</span>
-                    <span className="font-mono text-amber-400">+{m.scoreDelta} pts</span>
+                    <span className="font-mono text-[#F97316]">+{m.scoreDelta} pts</span>
                   </div>
                 ))}
               </div>

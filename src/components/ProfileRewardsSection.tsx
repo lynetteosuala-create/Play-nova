@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Award,
   Camera,
@@ -6,20 +6,27 @@ import {
   Coins,
   Copy,
   Flame,
+  Heart,
   KeyRound,
   Loader2,
   Lock,
+  Palette,
   Sparkles,
   Trash2,
   Trophy,
   User,
   Volume2,
   VolumeX,
+  Wallet,
 } from 'lucide-react';
+import { GAME_CATALOG } from '../game/catalog.ts';
 import type {
   AchievementItem,
+  AvatarConfig,
   ChallengeItem,
+  CoinTransactionItem,
   CosmeticRewardItem,
+  GameId,
   MatchRecord,
   PlayerProfile,
 } from '../types.ts';
@@ -35,6 +42,31 @@ interface ProfileRewardsSectionProps {
   matches: MatchRecord[];
   onPlayerUpdated: (player: PlayerProfile) => void;
   onRefreshProgression: () => void;
+}
+
+const EMBLEM_OPTIONS: Array<{ id: AvatarConfig['emblem']; label: string }> = [
+  { id: 'nova', label: 'Nova' },
+  { id: 'crown', label: 'Crown' },
+  { id: 'bolt', label: 'Bolt' },
+  { id: 'shield', label: 'Shield' },
+  { id: 'cyber', label: 'Cyber' },
+  { id: 'chess', label: 'Chess' },
+  { id: 'phoenix', label: 'Phoenix' },
+  { id: 'atom', label: 'Atom' },
+];
+
+const BG_SWATCHES = ['#131932', '#1B1136', '#0D2235', '#281512', '#0D241C', '#1C1D2E'];
+const ACCENT_SWATCHES = ['#8B5CF6', '#38BDF8', '#F97316', '#10B981', '#EC4899', '#FACC15'];
+
+function getThemeBannerClasses(themeId: string): string {
+  switch (themeId) {
+    case 'theme_cyber_blue':
+      return 'border-[#38BDF8]/40 bg-gradient-to-br from-[#0B1730] via-[#0E1324] to-[#081526]';
+    case 'theme_solar_forge':
+      return 'border-[#F97316]/40 bg-gradient-to-br from-[#21110B] via-[#0E1324] to-[#1A0D0B]';
+    default:
+      return 'border-[#8B5CF6]/35 bg-gradient-to-br from-[#14102C] via-[#0E1324] to-[#0B0F1E]';
+  }
 }
 
 async function resizeImageToDataUrl(file: File): Promise<string> {
@@ -90,10 +122,50 @@ export function ProfileRewardsSection({
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [unlockingId, setUnlockingId] = useState<string | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [savingAvatar, setSavingAvatar] = useState(false);
+  const [savingFavs, setSavingFavs] = useState(false);
   const [generatedKey, setGeneratedKey] = useState<string | null>(null);
   const [generatingKey, setGeneratingKey] = useState(false);
   const [copiedKey, setCopiedKey] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+
+  const [draftAvatar, setDraftAvatar] = useState<AvatarConfig>(player.avatarConfig);
+  const [walletData, setWalletData] = useState<{
+    totalEarned: number;
+    totalSpent: number;
+    transactions: CoinTransactionItem[];
+  }>({ totalEarned: 0, totalSpent: 0, transactions: [] });
+  const [loadingWallet, setLoadingWallet] = useState(true);
+
+  useEffect(() => {
+    setUsernameInput(player.username);
+    setDraftAvatar(player.avatarConfig);
+  }, [player.username, player.avatarConfig]);
+
+  const loadWallet = async () => {
+    setLoadingWallet(true);
+    try {
+      const res = await apiFetch<{
+        ok: boolean;
+        totalEarned: number;
+        totalSpent: number;
+        transactions: CoinTransactionItem[];
+      }>('/api/wallet/transactions');
+      setWalletData({
+        totalEarned: res.totalEarned ?? 0,
+        totalSpent: res.totalSpent ?? 0,
+        transactions: res.transactions || [],
+      });
+    } catch {
+      // handled gracefully
+    } finally {
+      setLoadingWallet(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadWallet();
+  }, [player.coins]);
 
   const xpPercent = Math.min(100, Math.round((player.currentLevelXp / Math.max(1, player.nextLevelXp)) * 100));
   const unlockedCount = achievements.filter((a) => a.unlocked).length;
@@ -114,6 +186,44 @@ export function ProfileRewardsSection({
       setFeedback({ type: 'err', text: err instanceof Error ? err.message : 'Unable to update name.' });
     } finally {
       setSavingName(false);
+    }
+  }
+
+  async function handleSaveAvatarConfig(nextCfg: AvatarConfig) {
+    setSavingAvatar(true);
+    setFeedback(null);
+    try {
+      const res = await apiFetch<{ ok: boolean; player: PlayerProfile }>('/api/profile/avatar', {
+        method: 'PATCH',
+        body: JSON.stringify(nextCfg),
+      });
+      onPlayerUpdated(res.player);
+      soundFx.playClick();
+      setFeedback({ type: 'ok', text: 'Custom avatar saved to your PLAYNOVA profile.' });
+    } catch (err) {
+      setFeedback({ type: 'err', text: err instanceof Error ? err.message : 'Unable to save avatar.' });
+    } finally {
+      setSavingAvatar(false);
+    }
+  }
+
+  async function handleToggleFavorite(gameId: GameId) {
+    setSavingFavs(true);
+    const exists = player.favoriteGames.includes(gameId);
+    const nextFavs = exists
+      ? player.favoriteGames.filter((g) => g !== gameId)
+      : [...player.favoriteGames, gameId];
+    try {
+      const res = await apiFetch<{ ok: boolean; player: PlayerProfile }>('/api/profile/favorites', {
+        method: 'PATCH',
+        body: JSON.stringify({ favoriteGames: nextFavs }),
+      });
+      onPlayerUpdated(res.player);
+      soundFx.playClick();
+    } catch (err) {
+      setFeedback({ type: 'err', text: err instanceof Error ? err.message : 'Could not save favorites.' });
+    } finally {
+      setSavingFavs(false);
     }
   }
 
@@ -140,10 +250,15 @@ export function ProfileRewardsSection({
         method: 'POST',
         body: JSON.stringify({ dataUrl: previewDataUrl }),
       });
-      onPlayerUpdated(res.player);
+      // Switch mode to photo automatically so uploaded photo shows immediately
+      const avatarRes = await apiFetch<{ ok: boolean; player: PlayerProfile }>('/api/profile/avatar', {
+        method: 'PATCH',
+        body: JSON.stringify({ ...res.player.avatarConfig, mode: 'photo' }),
+      });
+      onPlayerUpdated(avatarRes.player);
       setPreviewDataUrl(null);
       soundFx.playWin();
-      setFeedback({ type: 'ok', text: 'Profile picture saved and optimized.' });
+      setFeedback({ type: 'ok', text: 'Profile picture saved and equipped.' });
     } catch (err) {
       setFeedback({ type: 'err', text: err instanceof Error ? err.message : 'Upload failed.' });
     } finally {
@@ -155,13 +270,17 @@ export function ProfileRewardsSection({
     setUploadingPhoto(true);
     setFeedback(null);
     try {
-      const res = await apiFetch<{ ok: boolean; player: PlayerProfile }>('/api/profile/picture', {
+      await apiFetch<{ ok: boolean; player: PlayerProfile }>('/api/profile/picture', {
         method: 'DELETE',
+      });
+      const res = await apiFetch<{ ok: boolean; player: PlayerProfile }>('/api/profile/avatar', {
+        method: 'PATCH',
+        body: JSON.stringify({ ...draftAvatar, mode: 'emblem' }),
       });
       onPlayerUpdated(res.player);
       setPreviewDataUrl(null);
       soundFx.playClick();
-      setFeedback({ type: 'ok', text: 'Profile picture removed.' });
+      setFeedback({ type: 'ok', text: 'Photo removed. Switched back to Custom Emblem avatar.' });
     } catch (err) {
       setFeedback({ type: 'err', text: err instanceof Error ? err.message : 'Unable to remove photo.' });
     } finally {
@@ -179,11 +298,12 @@ export function ProfileRewardsSection({
       );
       onPlayerUpdated(res.player);
       onRefreshProgression();
+      void loadWallet();
       soundFx.playReward();
       setFeedback({
         type: 'ok',
         text: reward.unlocked
-          ? `Equipped ${reward.name} frame.`
+          ? `Equipped ${reward.name}.`
           : `Unlocked & equipped ${reward.name} (-${reward.coinCost} Coins).`,
       });
     } catch (err) {
@@ -258,21 +378,22 @@ export function ProfileRewardsSection({
         </div>
       )}
 
-      {/* Profile Header & Picture Upload */}
+      {/* Profile Header & Custom Avatar Creator */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <div className="lg:col-span-7 rounded-xl border border-white/[0.08] bg-[#10141F] p-6 space-y-6">
+        <div className={`lg:col-span-7 rounded-2xl border p-6 space-y-6 ${getThemeBannerClasses(player.profileTheme)}`}>
           <div className="flex flex-col gap-5 sm:flex-row sm:items-center">
             <PlayerAvatar
               username={player.username}
               profilePictureUrl={previewDataUrl || player.profilePictureUrl}
               activeFrame={player.activeFrame}
+              avatarConfig={previewDataUrl ? { ...draftAvatar, mode: 'photo' } : draftAvatar}
               size="xl"
             />
             <div className="flex-1 min-w-0 space-y-2">
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="font-display text-2xl font-bold text-white truncate">{player.username}</h1>
                 <span className="font-mono text-xs font-semibold text-emerald-400">
-                  ACTIVE PROFILE
+                  ACTIVE CONTENDER
                 </span>
               </div>
               <p className="text-xs font-mono text-slate-400 truncate">
@@ -290,10 +411,10 @@ export function ProfileRewardsSection({
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.12] bg-[#0B0E17] px-3.5 py-2 text-xs font-semibold text-white transition hover:border-[#E11D48] cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.12] bg-[#090D1A] px-3.5 py-2 text-xs font-semibold text-white transition hover:border-[#38BDF8] cursor-pointer"
                 >
-                  <Camera className="h-3.5 w-3.5 text-[#E11D48]" />
-                  Choose Photo (PNG/JPG/WEBP)
+                  <Camera className="h-3.5 w-3.5 text-[#38BDF8]" />
+                  Upload Photo
                 </button>
                 {previewDataUrl && (
                   <>
@@ -323,33 +444,131 @@ export function ProfileRewardsSection({
                     className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.1] px-3 py-2 text-xs font-medium text-slate-300 hover:border-rose-500/40 hover:text-rose-300 cursor-pointer"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
-                    Remove
+                    Remove Photo
                   </button>
                 )}
               </div>
             </div>
           </div>
 
+          {/* Custom Emblem Avatar Studio */}
+          <div className="rounded-xl border border-white/[0.08] bg-[#090D1A]/85 p-4 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Palette className="h-4 w-4 text-[#8B5CF6]" />
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                  Custom Avatar Creator
+                </h2>
+              </div>
+              <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = { ...draftAvatar, mode: 'emblem' as const };
+                    setDraftAvatar(next);
+                  }}
+                  className={`rounded-md px-2.5 py-1 text-xs font-semibold cursor-pointer ${
+                    draftAvatar.mode === 'emblem' ? 'bg-[#8B5CF6] text-white' : 'bg-[#0E1324] text-slate-400'
+                  }`}
+                >
+                  Custom Emblem
+                </button>
+                {player.profilePictureUrl && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = { ...draftAvatar, mode: 'photo' as const };
+                      setDraftAvatar(next);
+                    }}
+                    className={`rounded-md px-2.5 py-1 text-xs font-semibold cursor-pointer ${
+                      draftAvatar.mode === 'photo' ? 'bg-[#38BDF8] text-[#060811]' : 'bg-[#0E1324] text-slate-400'
+                    }`}
+                  >
+                    Uploaded Photo
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+              {EMBLEM_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setDraftAvatar({ ...draftAvatar, mode: 'emblem', emblem: opt.id })}
+                  className={`rounded-lg border px-2 py-2 text-[11px] font-semibold transition cursor-pointer ${
+                    draftAvatar.emblem === opt.id && draftAvatar.mode === 'emblem'
+                      ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white'
+                      : 'border-white/[0.08] bg-[#0E1324] text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-400">Backdrop:</span>
+                {BG_SWATCHES.map((hex) => (
+                  <button
+                    key={hex}
+                    type="button"
+                    aria-label={`Backdrop ${hex}`}
+                    onClick={() => setDraftAvatar({ ...draftAvatar, bgHex: hex })}
+                    style={{ backgroundColor: hex }}
+                    className={`h-5 w-5 rounded-full border-2 cursor-pointer ${
+                      draftAvatar.bgHex === hex ? 'border-white scale-110' : 'border-white/20'
+                    }`}
+                  />
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-400">Glow:</span>
+                {ACCENT_SWATCHES.map((hex) => (
+                  <button
+                    key={hex}
+                    type="button"
+                    aria-label={`Accent ${hex}`}
+                    onClick={() => setDraftAvatar({ ...draftAvatar, accentHex: hex })}
+                    style={{ backgroundColor: hex }}
+                    className={`h-5 w-5 rounded-full border-2 cursor-pointer ${
+                      draftAvatar.accentHex === hex ? 'border-white scale-110' : 'border-white/20'
+                    }`}
+                  />
+                ))}
+              </div>
+              <button
+                type="button"
+                disabled={savingAvatar}
+                onClick={() => void handleSaveAvatarConfig(draftAvatar)}
+                className="rounded-lg bg-[#8B5CF6] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#7C3AED] disabled:opacity-50 cursor-pointer"
+              >
+                {savingAvatar ? 'Saving...' : 'Save Avatar'}
+              </button>
+            </div>
+          </div>
+
           <form onSubmit={handleSaveUsername} className="border-t border-white/[0.08] pt-5">
-            <label htmlFor="gv-username-edit" className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+            <label htmlFor="pn-username-edit" className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
               Player Display Name
             </label>
             <div className="mt-2 flex flex-col gap-3 sm:flex-row">
               <div className="relative flex-1">
                 <User className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                 <input
-                  id="gv-username-edit"
+                  id="pn-username-edit"
                   type="text"
                   value={usernameInput}
                   onChange={(e) => setUsernameInput(e.target.value)}
                   maxLength={24}
-                  className="w-full rounded-lg border border-white/[0.1] bg-[#07090F] py-2 pl-9 pr-3 text-sm text-white focus:border-[#E11D48] focus:outline-none"
+                  className="w-full rounded-lg border border-white/[0.1] bg-[#060811] py-2 pl-9 pr-3 text-sm text-white focus:border-[#8B5CF6] focus:outline-none"
                 />
               </div>
               <button
                 type="submit"
                 disabled={savingName || usernameInput.trim() === player.username}
-                className="rounded-lg bg-[#E11D48] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#BE123C] disabled:opacity-50 cursor-pointer"
+                className="rounded-lg bg-[#8B5CF6] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#7C3AED] disabled:opacity-50 cursor-pointer"
               >
                 {savingName ? 'Saving...' : 'Update Name'}
               </button>
@@ -362,11 +581,11 @@ export function ProfileRewardsSection({
               Audio & Animation Preferences
             </h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="rounded-lg border border-white/[0.08] bg-[#0B0E17] p-4 space-y-3">
+              <div className="rounded-lg border border-white/[0.08] bg-[#090D1A] p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="inline-flex items-center gap-2 text-sm font-medium text-white">
                     {player.settings.soundEnabled ? (
-                      <Volume2 className="h-4 w-4 text-[#F59E0B]" />
+                      <Volume2 className="h-4 w-4 text-[#F97316]" />
                     ) : (
                       <VolumeX className="h-4 w-4 text-slate-500" />
                     )}
@@ -394,7 +613,7 @@ export function ProfileRewardsSection({
                       const vol = Number(e.target.value) / 100;
                       void updateSettings({ soundVolume: vol });
                     }}
-                    className="flex-1 accent-[#E11D48]"
+                    className="flex-1 accent-[#8B5CF6]"
                   />
                   <span className="w-9 text-right font-mono text-xs text-slate-300 tabular-nums">
                     {Math.round(player.settings.soundVolume * 100)}%
@@ -402,7 +621,7 @@ export function ProfileRewardsSection({
                 </div>
               </div>
 
-              <div className="rounded-lg border border-white/[0.08] bg-[#0B0E17] p-4 flex items-center justify-between">
+              <div className="rounded-lg border border-white/[0.08] bg-[#090D1A] p-4 flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-white">Reduced Motion</p>
                   <p className="mt-0.5 text-xs text-slate-400">Minimize celebratory transitions</p>
@@ -412,7 +631,7 @@ export function ProfileRewardsSection({
                   disabled={savingSettings}
                   onClick={() => void updateSettings({ reducedMotion: !player.settings.reducedMotion })}
                   className={`rounded-md px-3 py-1 text-xs font-semibold cursor-pointer ${
-                    player.settings.reducedMotion ? 'bg-[#E11D48] text-white' : 'bg-slate-800 text-slate-300'
+                    player.settings.reducedMotion ? 'bg-[#8B5CF6] text-white' : 'bg-slate-800 text-slate-300'
                   }`}
                 >
                   {player.settings.reducedMotion ? 'REDUCED' : 'FULL'}
@@ -425,7 +644,7 @@ export function ProfileRewardsSection({
           <div className="border-t border-white/[0.08] pt-5 space-y-3">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <KeyRound className="h-4 w-4 text-[#F59E0B]" />
+                <KeyRound className="h-4 w-4 text-[#F97316]" />
                 <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
                   Optional Cross-Device Progress Save Key
                 </h2>
@@ -435,23 +654,23 @@ export function ProfileRewardsSection({
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              No email or password is ever required to play GAMEVERSE. If you switch browsers or devices, enter your username + Progress Save Key on the Recover Profile tab to bring back your XP, coins, frames, and leaderboard rank.
+              No email or password is ever required to play PLAYNOVA. If you switch browsers or devices, enter your username + Progress Save Key on the Restore Progress modal to bring back your XP, coins, themes, frames, and rank.
             </p>
 
             {generatedKey && (
-              <div className="flex items-center justify-between rounded-lg border border-amber-500/40 bg-[#07090F] px-4 py-3">
+              <div className="flex items-center justify-between rounded-lg border border-[#F97316]/40 bg-[#060811] px-4 py-3">
                 <div>
                   <p className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
                     New Progress Save Key (Shown Once)
                   </p>
-                  <p className="mt-0.5 font-mono text-base font-bold tracking-widest text-[#F59E0B]">
+                  <p className="mt-0.5 font-mono text-base font-bold tracking-widest text-[#F97316]">
                     {generatedKey}
                   </p>
                 </div>
                 <button
                   type="button"
                   onClick={() => void handleCopyKey(generatedKey)}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.12] bg-[#10141F] px-3 py-1.5 text-xs font-semibold text-white hover:border-white/25 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.12] bg-[#0E1324] px-3 py-1.5 text-xs font-semibold text-white hover:border-white/25 cursor-pointer"
                 >
                   {copiedKey ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
                   {copiedKey ? 'Copied' : 'Copy'}
@@ -463,7 +682,7 @@ export function ProfileRewardsSection({
               type="button"
               disabled={generatingKey}
               onClick={() => void handleGenerateRecoveryKey()}
-              className="inline-flex items-center gap-2 rounded-lg bg-[#F59E0B] px-4 py-2 text-xs font-semibold text-[#07090F] transition hover:bg-[#D97706] disabled:opacity-60 cursor-pointer"
+              className="inline-flex items-center gap-2 rounded-lg bg-[#F97316] px-4 py-2 text-xs font-bold text-[#060811] transition hover:bg-[#EA580C] disabled:opacity-60 cursor-pointer"
             >
               {generatingKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
               {player.hasRecoveryKey ? 'Rotate Progress Save Key' : 'Generate Progress Save Key'}
@@ -471,18 +690,18 @@ export function ProfileRewardsSection({
           </div>
         </div>
 
-        {/* Progression Summary Card */}
-        <div className="lg:col-span-5 rounded-xl border border-white/[0.08] bg-[#10141F] p-6 space-y-5">
+        {/* Progression Summary Card & 12-Game Breakdown */}
+        <div className="lg:col-span-5 rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6 space-y-5">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs font-mono uppercase tracking-wider text-slate-400">Campaign Rank</p>
+              <p className="text-xs font-mono uppercase tracking-wider text-slate-400">Contender Rank</p>
               <p className="mt-1 font-display text-3xl font-bold text-white tabular-nums">
                 Level {player.level}
               </p>
             </div>
             <div className="text-right">
               <p className="text-xs font-mono uppercase tracking-wider text-slate-400">Virtual Wallet</p>
-              <p className="mt-1 inline-flex items-center gap-1.5 font-mono text-2xl font-bold text-[#F59E0B] tabular-nums">
+              <p className="mt-1 inline-flex items-center gap-1.5 font-mono text-2xl font-bold text-[#F97316] tabular-nums">
                 <Coins className="h-5 w-5" />
                 {player.coins.toLocaleString()}
               </p>
@@ -496,9 +715,9 @@ export function ProfileRewardsSection({
                 {player.currentLevelXp} / {player.nextLevelXp} XP ({xpPercent}%)
               </span>
             </div>
-            <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-[#07090F]">
+            <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-[#060811]">
               <div
-                className="h-full rounded-full bg-[#E11D48] transition-all duration-300"
+                className="h-full rounded-full bg-gradient-to-r from-[#8B5CF6] to-[#38BDF8] transition-all duration-300"
                 style={{ width: `${xpPercent}%` }}
               />
             </div>
@@ -506,12 +725,12 @@ export function ProfileRewardsSection({
 
           <div className="grid grid-cols-2 gap-3 pt-1">
             {[
-              { label: 'Total Score', value: player.points.toLocaleString(), icon: Trophy, color: 'text-[#F59E0B]' },
-              { label: 'Current Streak', value: `${player.currentStreak} wins`, icon: Flame, color: 'text-[#E11D48]' },
+              { label: 'Total Score', value: player.points.toLocaleString(), icon: Trophy, color: 'text-[#F97316]' },
+              { label: 'Current Streak', value: `${player.currentStreak} wins`, icon: Flame, color: 'text-[#8B5CF6]' },
               { label: 'Best Streak', value: `${player.bestStreak} wins`, icon: Sparkles, color: 'text-emerald-400' },
-              { label: 'Badges', value: `${unlockedCount} / ${achievements.length}`, icon: Award, color: 'text-sky-400' },
+              { label: 'Badges', value: `${unlockedCount} / ${achievements.length}`, icon: Award, color: 'text-[#38BDF8]' },
             ].map((stat) => (
-              <div key={stat.label} className="rounded-lg border border-white/[0.06] bg-[#0B0E17] p-3.5">
+              <div key={stat.label} className="rounded-lg border border-white/[0.06] bg-[#090D1A] p-3.5">
                 <div className="flex items-center justify-between text-xs text-slate-400">
                   <span>{stat.label}</span>
                   <stat.icon className={`h-3.5 w-3.5 ${stat.color}`} />
@@ -522,64 +741,104 @@ export function ProfileRewardsSection({
           </div>
 
           <div className="border-t border-white/[0.08] pt-4">
-            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Game Breakdown</p>
-            <div className="mt-3 space-y-2 text-xs">
-              {(
-                [
-                  ['Tic-Tac-Toe', player.stats.byGame.tictactoe],
-                  ['Rock-Paper-Scissors', player.stats.byGame.rps],
-                  ['Guess the Number', player.stats.byGame.guess_number],
-                ] as const
-              ).map(([title, s]) => (
-                <div
-                  key={title}
-                  className="flex items-center justify-between rounded-lg bg-[#0B0E17] px-3 py-2 text-slate-300 tabular-nums"
-                >
-                  <span className="font-medium text-white">{title}</span>
-                  <span className="font-mono text-slate-400">
-                    {s.wins}W · {s.played}G · Best {s.bestScore}
-                  </span>
-                </div>
-              ))}
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              12-Game Arena Breakdown
+            </p>
+            <div className="mt-3 max-h-72 overflow-y-auto space-y-2 text-xs pr-1">
+              {GAME_CATALOG.map((g) => {
+                const s = player.stats.byGame[g.id] || { played: 0, wins: 0, bestScore: 0 };
+                return (
+                  <div
+                    key={g.id}
+                    className="flex items-center justify-between rounded-lg bg-[#090D1A] px-3 py-2 text-slate-300 tabular-nums"
+                  >
+                    <span className="font-medium text-white truncate pr-2">{g.name}</span>
+                    <span className="font-mono text-slate-400 shrink-0">
+                      {s.wins}W · {s.played}G · Best {s.bestScore}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Cosmetic Avatar Frame Vault (Earned Coins Only — Zero Gambling) */}
-      <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-b border-white/[0.08] pb-4">
+      {/* Favourite Games Picker */}
+      <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="font-display text-xl font-bold text-white">Avatar Frame Vault</h2>
+            <h2 className="font-display text-xl font-bold text-white flex items-center gap-2">
+              <Heart className="h-5 w-5 text-[#F97316]" />
+              Favourite Games ({player.favoriteGames.length})
+            </h2>
             <p className="text-xs text-slate-400">
-              Unlock cosmetic profile frames using virtual Game Coins earned from playing and completing challenges.
+              Pin your top PLAYNOVA arenas for instant quick-launch inside the lobby.
             </p>
           </div>
-          <span className="font-mono text-sm font-bold text-[#F59E0B] tabular-nums">
+          {savingFavs && <span className="text-xs font-mono text-[#38BDF8]">Saving...</span>}
+        </div>
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
+          {GAME_CATALOG.map((g) => {
+            const active = player.favoriteGames.includes(g.id);
+            return (
+              <button
+                key={g.id}
+                type="button"
+                onClick={() => void handleToggleFavorite(g.id)}
+                className={`flex items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-xs font-semibold transition cursor-pointer ${
+                  active
+                    ? 'border-[#F97316] bg-[#F97316]/15 text-white'
+                    : 'border-white/[0.08] bg-[#090D1A] text-slate-400 hover:text-white'
+                }`}
+              >
+                <span className="truncate">{g.name}</span>
+                <Heart className={`h-3.5 w-3.5 shrink-0 ${active ? 'fill-[#F97316] text-[#F97316]' : 'text-slate-600'}`} />
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Cosmetic Avatar Frame & Profile Theme Vault */}
+      <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-b border-white/[0.08] pb-4">
+          <div>
+            <h2 className="font-display text-xl font-bold text-white">Avatar Frames & Profile Themes Vault</h2>
+            <p className="text-xs text-slate-400">
+              Unlock cosmetic frames and custom profile banner themes using Virtual Coins earned from gameplay, challenges, and tournaments.
+            </p>
+          </div>
+          <span className="font-mono text-sm font-bold text-[#F97316] tabular-nums">
             Balance: {player.coins.toLocaleString()} Coins
           </span>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {rewards.map((reward) => (
             <div
               key={reward.id}
               className={`flex flex-col justify-between rounded-xl border p-4 ${
-                reward.equipped ? 'border-[#E11D48] bg-[#171220]' : 'border-white/[0.08] bg-[#0B0E17]'
+                reward.equipped ? 'border-[#8B5CF6] bg-[#161232]' : 'border-white/[0.08] bg-[#090D1A]'
               }`}
             >
               <div>
                 <div className="flex items-center justify-between">
-                  <span
-                    className="h-5 w-5 rounded-md border"
-                    style={{ borderColor: reward.accentHex, backgroundColor: `${reward.accentHex}22` }}
-                  />
-                  <span className="font-mono text-xs text-[#F59E0B] tabular-nums">
+                  <span className="font-mono text-[10px] uppercase tracking-wider text-[#38BDF8]">
+                    {reward.category}
+                  </span>
+                  <span className="font-mono text-xs text-[#F97316] tabular-nums">
                     {reward.coinCost === 0 ? 'FREE' : `${reward.coinCost} COINS`}
                   </span>
                 </div>
-                <h3 className="mt-3 font-display text-base font-bold text-white">{reward.name}</h3>
-                <p className="mt-1 text-xs text-slate-400">{reward.description}</p>
+                <div className="mt-2.5 flex items-center gap-2">
+                  <span
+                    className="h-4 w-4 rounded-md border shrink-0"
+                    style={{ borderColor: reward.accentHex, backgroundColor: `${reward.accentHex}33` }}
+                  />
+                  <h3 className="font-display text-base font-bold text-white">{reward.name}</h3>
+                </div>
+                <p className="mt-1.5 text-xs text-slate-400">{reward.description}</p>
               </div>
 
               <button
@@ -592,7 +851,7 @@ export function ProfileRewardsSection({
                     : reward.unlocked
                     ? 'bg-white/10 text-white hover:bg-white/20'
                     : player.coins >= reward.coinCost
-                    ? 'bg-[#F59E0B] text-[#07090F] hover:bg-[#D97706]'
+                    ? 'bg-[#F97316] text-[#060811] font-bold hover:bg-[#EA580C]'
                     : 'bg-white/[0.04] text-slate-500 cursor-not-allowed'
                 }`}
               >
@@ -601,7 +860,9 @@ export function ProfileRewardsSection({
                   : reward.equipped
                   ? 'Equipped'
                   : reward.unlocked
-                  ? 'Equip Frame'
+                  ? reward.category === 'theme'
+                    ? 'Apply Theme'
+                    : 'Equip Frame'
                   : player.coins >= reward.coinCost
                   ? `Unlock (${reward.coinCost})`
                   : 'Not Enough Coins'}
@@ -611,19 +872,84 @@ export function ProfileRewardsSection({
         </div>
       </div>
 
+      {/* Virtual Coin Wallet & Transaction Ledger */}
+      <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6 space-y-5">
+        <div className="flex flex-col gap-3 border-b border-white/[0.08] pb-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="font-display text-xl font-bold text-white flex items-center gap-2">
+              <Wallet className="h-5 w-5 text-[#F97316]" />
+              Virtual Coin Wallet & Ledger
+            </h2>
+            <p className="text-xs text-slate-400">
+              Complete history of earned match rewards, tournament purses, challenge bonuses, and cosmetic unlocks.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-4 font-mono text-xs tabular-nums">
+            <span className="text-emerald-400">Earned: +{walletData.totalEarned.toLocaleString()}c</span>
+            <span className="text-rose-400">Spent: -{walletData.totalSpent.toLocaleString()}c</span>
+            <span className="font-bold text-[#F97316]">Balance: {player.coins.toLocaleString()}c</span>
+          </div>
+        </div>
+
+        {loadingWallet ? (
+          <p className="py-6 text-center text-xs text-slate-400">Loading wallet transactions...</p>
+        ) : walletData.transactions.length === 0 ? (
+          <p className="py-6 text-center text-xs text-slate-400">
+            No wallet transactions recorded yet. Play any game or challenge to earn Virtual Coins!
+          </p>
+        ) : (
+          <div className="overflow-x-auto max-h-72 overflow-y-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="border-b border-white/[0.08] font-mono uppercase text-slate-400">
+                <tr>
+                  <th className="py-2 pr-4">Category</th>
+                  <th className="py-2 pr-4">Description</th>
+                  <th className="py-2 pr-4 text-right">Amount</th>
+                  <th className="py-2 pr-4 text-right">Balance After</th>
+                  <th className="py-2 text-right">Date</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/[0.05]">
+                {walletData.transactions.map((tx) => (
+                  <tr key={tx.id} className="text-slate-300">
+                    <td className="py-2.5 pr-4 font-mono uppercase text-[11px] text-[#38BDF8]">
+                      {tx.category}
+                    </td>
+                    <td className="py-2.5 pr-4 text-white">{tx.description}</td>
+                    <td
+                      className={`py-2.5 pr-4 text-right font-mono font-bold tabular-nums ${
+                        tx.amount >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                      }`}
+                    >
+                      {tx.amount >= 0 ? `+${tx.amount}` : tx.amount}c
+                    </td>
+                    <td className="py-2.5 pr-4 text-right font-mono text-[#F97316] tabular-nums">
+                      {tx.balanceAfter.toLocaleString()}c
+                    </td>
+                    <td className="py-2.5 text-right font-mono text-slate-500">
+                      {new Date(tx.createdAt).toLocaleDateString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       {/* Challenges & Achievements */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6">
+        <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6">
           <h2 className="font-display text-xl font-bold text-white">Daily & Weekly Challenges</h2>
           <p className="mt-1 text-xs text-slate-400">Auto-tracked across every validated match.</p>
           <div className="mt-4 space-y-3">
             {challenges.map((c) => {
               const pct = Math.min(100, Math.round((c.progress / Math.max(1, c.targetCount)) * 100));
               return (
-                <div key={c.id} className="rounded-lg border border-white/[0.08] bg-[#0B0E17] p-4">
+                <div key={c.id} className="rounded-lg border border-white/[0.08] bg-[#090D1A] p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <span className="font-mono text-[10px] uppercase tracking-wider text-[#F59E0B]">
+                      <span className="font-mono text-[10px] uppercase tracking-wider text-[#F97316]">
                         {c.kind} challenge
                       </span>
                       <h3 className="font-display text-sm font-bold text-white">{c.title}</h3>
@@ -631,13 +957,13 @@ export function ProfileRewardsSection({
                     </div>
                     <div className="text-right shrink-0 font-mono text-xs">
                       <p className="text-emerald-400">+{c.xpReward} XP</p>
-                      <p className="text-[#F59E0B]">+{c.coinReward} Coins</p>
+                      <p className="text-[#F97316]">+{c.coinReward} Coins</p>
                     </div>
                   </div>
                   <div className="mt-3 flex items-center gap-3">
-                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-[#07090F]">
+                    <div className="h-2 flex-1 overflow-hidden rounded-full bg-[#060811]">
                       <div
-                        className={`h-full rounded-full ${c.completed ? 'bg-emerald-500' : 'bg-[#E11D48]'}`}
+                        className={`h-full rounded-full ${c.completed ? 'bg-emerald-500' : 'bg-[#8B5CF6]'}`}
                         style={{ width: `${pct}%` }}
                       />
                     </div>
@@ -651,8 +977,10 @@ export function ProfileRewardsSection({
           </div>
         </div>
 
-        <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6">
-          <h2 className="font-display text-xl font-bold text-white">Achievements ({unlockedCount}/{achievements.length})</h2>
+        <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6">
+          <h2 className="font-display text-xl font-bold text-white">
+            Achievements ({unlockedCount}/{achievements.length})
+          </h2>
           <p className="mt-1 text-xs text-slate-400">Permanent milestones unlocked through skillful play.</p>
           <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
             {achievements.map((a) => (
@@ -661,7 +989,7 @@ export function ProfileRewardsSection({
                 className={`rounded-lg border p-3.5 ${
                   a.unlocked
                     ? 'border-emerald-500/35 bg-emerald-950/15'
-                    : 'border-white/[0.06] bg-[#0B0E17] opacity-75'
+                    : 'border-white/[0.06] bg-[#090D1A] opacity-75'
                 }`}
               >
                 <div className="flex items-center justify-between">
@@ -676,7 +1004,7 @@ export function ProfileRewardsSection({
                 </div>
                 <h3 className="mt-1.5 font-display text-sm font-bold text-white">{a.title}</h3>
                 <p className="mt-0.5 text-xs text-slate-400">{a.description}</p>
-                <p className="mt-2 font-mono text-[11px] text-[#F59E0B]">
+                <p className="mt-2 font-mono text-[11px] text-[#F97316]">
                   +{a.xpReward} XP · +{a.coinReward} Coins
                 </p>
               </div>
@@ -686,10 +1014,12 @@ export function ProfileRewardsSection({
       </div>
 
       {/* Match History */}
-      <div className="rounded-xl border border-white/[0.08] bg-[#10141F] p-6">
+      <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6">
         <h2 className="font-display text-xl font-bold text-white">Recent Match Activity</h2>
         {matches.length === 0 ? (
-          <p className="mt-3 text-sm text-slate-400">No completed matches yet. Jump into any arena game to start your record.</p>
+          <p className="mt-3 text-sm text-slate-400">
+            No completed matches yet. Jump into any arena game to start your record.
+          </p>
         ) : (
           <div className="mt-4 overflow-x-auto">
             <table className="w-full text-left text-xs">

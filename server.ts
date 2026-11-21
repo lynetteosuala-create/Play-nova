@@ -5,13 +5,18 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { createServer as createViteServer } from 'vite';
-import { DEFAULT_PLAYER_SETTINGS, GUESS_PRESETS } from './src/game/catalog.ts';
+import {
+  ALL_GAME_IDS,
+  DEFAULT_AVATAR_CONFIG,
+  DEFAULT_PLAYER_SETTINGS,
+  GAME_CATALOG,
+  GUESS_PRESETS,
+} from './src/game/catalog.ts';
 import { normalizeTttConfig } from './src/game/tttRules.ts';
-import type { DifficultyLevel, GameId, PlayerSettings } from './src/types.ts';
+import type { AvatarConfig, CoinTransactionItem, DifficultyLevel, GameId, PlayerSettings } from './src/types.ts';
 import {
   avatarUploadsDir,
   bumpPreviewCacheVersion,
-  computeLevelFromXp,
   createNotification,
   db,
   type DbPlayer,
@@ -19,6 +24,8 @@ import {
   getPeriodKeys,
   getPreviewCacheVersion,
   hashSecret,
+  listTournaments,
+  logCoinTransaction,
   logLinkPreviewRequest,
   logServerError,
   recordMatchAndProgress,
@@ -98,40 +105,56 @@ function createPlayerSession(res: Response, playerId: string): string {
   return rawToken;
 }
 
-function getAuthenticatedPlayer(req: Request): { player: DbPlayer; token: string; expired: boolean } {
+function getAuthenticatedPlayer(req: Request): {
+  player: DbPlayer;
+  token: string;
+  expired: boolean;
+  banned: boolean;
+} {
   const token = extractToken(req, 'gv_session', 'authorization');
-  if (!token) return { player: undefined as unknown as DbPlayer, token: '', expired: false };
+  if (!token) return { player: undefined as unknown as DbPlayer, token: '', expired: false, banned: false };
   const now = Date.now();
   const sess = db
     .prepare('SELECT player_id, expires_at FROM player_sessions WHERE token_hash = ?')
     .get(sha256(token)) as { player_id: string; expires_at: number } | undefined;
 
   if (!sess) {
-    return { player: undefined as unknown as DbPlayer, token, expired: true };
+    return { player: undefined as unknown as DbPlayer, token, expired: true, banned: false };
   }
   if (sess.expires_at <= now) {
     db.prepare('DELETE FROM player_sessions WHERE token_hash = ?').run(sha256(token));
-    return { player: undefined as unknown as DbPlayer, token, expired: true };
+    return { player: undefined as unknown as DbPlayer, token, expired: true, banned: false };
   }
 
   const row = db.prepare('SELECT * FROM players WHERE id = ?').get(sess.player_id) as DbPlayer | undefined;
   if (!row) {
-    return { player: undefined as unknown as DbPlayer, token, expired: true };
+    return { player: undefined as unknown as DbPlayer, token, expired: true, banned: false };
+  }
+  if (row.banned) {
+    db.prepare('DELETE FROM player_sessions WHERE token_hash = ?').run(sha256(token));
+    return { player: undefined as unknown as DbPlayer, token, expired: false, banned: true };
   }
 
   db.prepare('UPDATE player_sessions SET last_active_at = ? WHERE token_hash = ?').run(now, sha256(token));
   db.prepare('UPDATE players SET last_seen_at = ? WHERE id = ?').run(new Date().toISOString(), row.id);
-  return { player: row, token, expired: false };
+  return { player: row, token, expired: false, banned: false };
 }
 
 function requirePlayer(req: AuthedPlayerRequest, res: Response, next: NextFunction) {
   const auth = getAuthenticatedPlayer(req);
+  if (auth.banned) {
+    res.status(403).json({
+      code: 'PLAYER_BANNED',
+      error: 'This PLAYNOVA username has been suspended by an administrator.',
+    });
+    return;
+  }
   if (!auth.player) {
     res.status(401).json({
       code: auth.expired ? 'SESSION_EXPIRED' : 'UNAUTHENTICATED',
       error: auth.expired
-        ? 'Your session has expired or was revoked. Sign in below to resume without losing your place.'
-        : 'Please sign in to access GAMEVERSE.',
+        ? 'Your session expired. Enter your username to resume playing.'
+        : 'Enter a username to access PLAYNOVA.',
     });
     return;
   }
@@ -200,7 +223,7 @@ async function startServer() {
     res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=86400');
     res.send(
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#07090F"/><rect x="4" y="4" width="56" height="56" rx="11" fill="#10141F" stroke="#E11D48" stroke-width="2.5"/><path d="M18 32h28M32 18v28" stroke="#F59E0B" stroke-width="3.5" stroke-linecap="round"/><circle cx="32" cy="32" r="14" fill="none" stroke="#F8FAFC" stroke-width="3"/></svg>`
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#060811"/><rect x="4" y="4" width="56" height="56" rx="11" fill="#0E1324" stroke="#8B5CF6" stroke-width="2.5"/><path d="M22 18h14a10 10 0 0 1 0 20H22V18Zm0 20v10" stroke="#38BDF8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/><circle cx="44" cy="44" r="5" fill="#F97316"/></svg>`
     );
   });
 
@@ -216,6 +239,7 @@ async function startServer() {
         'Allow: /og-hero.jpg',
         'Allow: /share-media/',
         'Allow: /games/',
+        'Allow: /tournaments',
         'Allow: /leaderboard',
         'Disallow: /api/admin/',
         '',
@@ -265,7 +289,7 @@ async function startServer() {
 
   // Primary public HTTPS Open Graph / Twitter Card hero image
   app.get('/og-hero.jpg', (req, res) => {
-    const filePath = path.resolve(process.cwd(), 'src/assets/images', 'gv_social_preview_1794849621278.jpg');
+    const filePath = path.resolve(process.cwd(), 'src/assets/images', 'pn_social_preview_1795280294177.jpg');
     sendPublicShareImage(req, res, filePath);
   });
 
@@ -273,10 +297,22 @@ async function startServer() {
   app.get('/share-media/:key', (req, res) => {
     const cleanKey = String(req.params.key || 'hero').replace(/\.(jpg|jpeg)$/i, '').toLowerCase();
     const mediaMap: Record<string, string> = {
-      hero: 'gv_social_preview_1794849621278.jpg',
+      hero: 'pn_social_preview_1795280294177.jpg',
+      strategy: 'pn_cat_strategy_1795280295307.jpg',
+      brain: 'pn_cat_brain_1795280296543.jpg',
+      arcade: 'pn_cat_arcade_1795280296081.jpg',
       tictactoe: 'gv_card_tictactoe_1794676068935.jpg',
       rps: 'gv_card_rps_1794676069274.jpg',
       guess_number: 'gv_card_guess_1794676069754.jpg',
+      connect_four: 'pn_cat_strategy_1795280295307.jpg',
+      chess: 'pn_cat_strategy_1795280295307.jpg',
+      sudoku: 'pn_cat_brain_1795280296543.jpg',
+      word_battle: 'pn_cat_brain_1795280296543.jpg',
+      pattern_recognition: 'pn_cat_brain_1795280296543.jpg',
+      memory_match: 'pn_cat_arcade_1795280296081.jpg',
+      trivia_challenge: 'pn_cat_arcade_1795280296081.jpg',
+      quick_math: 'pn_cat_arcade_1795280296081.jpg',
+      reaction_test: 'pn_cat_arcade_1795280296081.jpg',
     };
     const filename = mediaMap[cleanKey] || mediaMap.hero;
     const filePath = path.resolve(process.cwd(), 'src/assets/images', filename);
@@ -334,66 +370,53 @@ async function startServer() {
     const version = versionFromQuery || String(getPreviewCacheVersion());
     const canonicalPath = reqPath === '/' ? '/' : reqPath;
 
-    if (cleanPath.includes('tictactoe')) {
+    const matchedGame = GAME_CATALOG.find((g) => cleanPath.includes(`/games/${g.id}`) || cleanPath.endsWith(`/${g.id}`));
+    if (matchedGame) {
       return {
-        title: 'Tic-Tac-Toe Arena — GAMEVERSE',
-        description:
-          'Play classic 3×3 or expand up to 15×15 custom N-in-a-row boards against intelligent AI or human opponents on GAMEVERSE.',
-        imageUrl: `${baseUrl}/share-media/tictactoe.jpg?v=${version}`,
+        title: `${matchedGame.name} — PLAYNOVA`,
+        description: `${matchedGame.description} Enter with just a username on PLAYNOVA.`,
+        imageUrl: `${baseUrl}/share-media/${matchedGame.id}.jpg?v=${version}`,
         imageWidth: 1200,
         imageHeight: 896,
-        imageAlt: 'GAMEVERSE Tic-Tac-Toe tactical slate board',
+        imageAlt: `PLAYNOVA ${matchedGame.name} arena artwork`,
         canonicalUrl: `${baseUrl}${canonicalPath}`,
         version,
       };
     }
-    if (cleanPath.includes('rps')) {
+    if (cleanPath.includes('tournaments')) {
       return {
-        title: 'Rock-Paper-Scissors Duel — GAMEVERSE',
+        title: 'Tournaments & Brackets — PLAYNOVA',
         description:
-          'Outread AI or challenge real players in fast Rock-Paper-Scissors matches on GAMEVERSE. Enter with just a username!',
-        imageUrl: `${baseUrl}/share-media/rps.jpg?v=${version}`,
-        imageWidth: 1200,
-        imageHeight: 896,
-        imageAlt: 'GAMEVERSE Rock-Paper-Scissors tabletop medallions',
-        canonicalUrl: `${baseUrl}${canonicalPath}`,
-        version,
-      };
-    }
-    if (cleanPath.includes('guess')) {
-      return {
-        title: 'Guess the Number Vault — GAMEVERSE',
-        description:
-          'Crack secret numbers with Higher/Lower telemetry and daily vault challenges on GAMEVERSE. Enter with just a username!',
-        imageUrl: `${baseUrl}/share-media/guess_number.jpg?v=${version}`,
-        imageWidth: 1200,
-        imageHeight: 896,
-        imageAlt: 'GAMEVERSE Guess the Number combination vault dial',
+          'Join scheduled multiplayer cups and exhibition brackets on PLAYNOVA. Win virtual coins and climb rankings.',
+        imageUrl: `${baseUrl}/og-hero.jpg?v=${version}`,
+        imageWidth: 1376,
+        imageHeight: 768,
+        imageAlt: 'PLAYNOVA Tournaments and Brackets',
         canonicalUrl: `${baseUrl}${canonicalPath}`,
         version,
       };
     }
     if (cleanPath.includes('leaderboard')) {
       return {
-        title: 'Global Leaderboards — GAMEVERSE',
+        title: 'Global Leaderboards — PLAYNOVA',
         description:
-          'Compare all-time and weekly rankings across Tic-Tac-Toe, Rock-Paper-Scissors, and Guess the Number on GAMEVERSE.',
+          'Compare all-time, monthly, and weekly rankings across 12 playable arenas on PLAYNOVA.',
         imageUrl: `${baseUrl}/og-hero.jpg?v=${version}`,
         imageWidth: 1376,
         imageHeight: 768,
-        imageAlt: 'GAMEVERSE Global Leaderboards arena',
+        imageAlt: 'PLAYNOVA Global Leaderboards arena',
         canonicalUrl: `${baseUrl}${canonicalPath}`,
         version,
       };
     }
     return {
-      title: 'GAMEVERSE — The Ultimate Mini-Gaming World',
+      title: 'PLAYNOVA — Enter. Compete. Conquer.',
       description:
-        'Play exciting mini-games, challenge AI opponents and compete with real players. Enter with just a username!',
+        'Challenge intelligent AI opponents, compete in real-time multiplayer rooms, play 12 skill mini-games, and earn virtual rewards with just a username.',
       imageUrl: `${baseUrl}/og-hero.jpg?v=${version}`,
       imageWidth: 1376,
       imageHeight: 768,
-      imageAlt: 'GAMEVERSE — Play. Compete. Have Fun. futuristic gaming preview with gamers, coins and trophies',
+      imageAlt: 'PLAYNOVA — Enter. Compete. Conquer. futuristic gaming preview with gamers, coins and trophies',
       canonicalUrl: `${baseUrl}${canonicalPath}`,
       version,
     };
@@ -406,7 +429,7 @@ async function startServer() {
       `<meta name="description" content="${escapeHtml(meta.description)}" />`,
       `<meta name="robots" content="index, follow, max-image-preview:large" />`,
       `<link rel="canonical" href="${escapeHtml(meta.canonicalUrl)}" />`,
-      `<meta property="og:site_name" content="GAMEVERSE" />`,
+      `<meta property="og:site_name" content="PLAYNOVA" />`,
       `<meta property="og:type" content="website" />`,
       `<meta property="og:locale" content="en_US" />`,
       `<meta property="og:url" content="${escapeHtml(meta.canonicalUrl)}" />`,
@@ -450,12 +473,20 @@ async function startServer() {
 
   app.get('/api/auth/me', (req, res) => {
     const auth = getAuthenticatedPlayer(req);
+    if (auth.banned) {
+      res.status(403).json({
+        authenticated: false,
+        code: 'PLAYER_BANNED',
+        error: 'This PLAYNOVA username has been suspended by an administrator.',
+      });
+      return;
+    }
     if (!auth.player) {
       if (auth.expired) {
         res.status(401).json({
           authenticated: false,
           code: 'SESSION_EXPIRED',
-          error: 'Your session expired. Re-enter or recover your profile to continue.',
+          error: 'Your session expired. Enter your username to continue.',
         });
         return;
       }
@@ -487,11 +518,11 @@ async function startServer() {
     res.json({
       valid: true,
       available: !existing,
-      reason: existing ? 'That username is already in use. Pick another or recover your saved profile.' : undefined,
+      reason: existing ? 'That username is already active. Pick a fresh username to jump right in.' : undefined,
     });
   });
 
-  app.post('/api/players/enter', rateLimit('player-enter', 25, 60_000), (req, res) => {
+  app.post('/api/players/enter', rateLimit('player-enter', 30, 60_000), (req, res) => {
     const username = normalizeUsername(req.body?.username);
     if (!isValidUsername(username)) {
       res.status(400).json({
@@ -501,31 +532,55 @@ async function startServer() {
     }
 
     const existing = db
-      .prepare('SELECT id FROM players WHERE LOWER(username) = LOWER(?)')
-      .get(username) as { id: string } | undefined;
+      .prepare('SELECT id, banned FROM players WHERE LOWER(username) = LOWER(?)')
+      .get(username) as { id: string; banned: number } | undefined;
     if (existing) {
+      if (existing.banned) {
+        res.status(403).json({
+          error: 'That username is suspended. Please choose a different username.',
+        });
+        return;
+      }
       res.status(409).json({
-        error: 'That username is already taken. Choose another username or switch to Recover Profile if it belongs to you.',
+        error: 'That username is already taken. Try adding a number or tag to claim your arena handle.',
       });
       return;
     }
 
     const playerId = crypto.randomUUID();
     const now = new Date().toISOString();
-    const recoveryKey = `GV-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    const recoveryKey = `PN-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 
     db.prepare(
       `INSERT INTO players
        (id, email, username, password_hash, email_verified, security_password_hash, security_password_enabled, recovery_key_hash,
         xp, level, coins, points, current_streak, best_streak,
-        profile_picture_file, active_frame, unlocked_cosmetics_json, settings_json, created_at, updated_at, last_seen_at)
-       VALUES (?, NULL, ?, NULL, 1, NULL, 0, ?, 0, 1, 100, 0, 0, 0, NULL, 'frame_slate', '["frame_slate"]', ?, ?, ?, ?)`
-    ).run(playerId, username, hashSecret(recoveryKey), JSON.stringify(DEFAULT_PLAYER_SETTINGS), now, now, now);
+        profile_picture_file, active_frame, profile_theme, avatar_config_json, favorite_games_json,
+        unlocked_cosmetics_json, settings_json, banned, created_at, updated_at, last_seen_at)
+       VALUES (?, NULL, ?, NULL, 1, NULL, 0, ?, 0, 1, 100, 0, 0, 0, NULL, 'frame_slate', 'theme_midnight_nova', ?, '[]', '["frame_slate","theme_midnight_nova"]', ?, 0, ?, ?, ?)`
+    ).run(
+      playerId,
+      username,
+      hashSecret(recoveryKey),
+      JSON.stringify(DEFAULT_AVATAR_CONFIG),
+      JSON.stringify(DEFAULT_PLAYER_SETTINGS),
+      now,
+      now,
+      now
+    );
+
+    logCoinTransaction({
+      playerId,
+      amount: 100,
+      balanceAfter: 100,
+      category: 'starter',
+      description: 'PLAYNOVA welcome virtual coin bonus',
+    });
 
     createNotification(
       playerId,
-      'Welcome to GAMEVERSE',
-      'You received 100 starter Game Coins! Play against AI, challenge real humans, or join Mixed Arenas.',
+      'Welcome to PLAYNOVA',
+      'You received 100 starter Virtual Coins! Play all 12 games, enter tournaments, and challenge rivals online.',
       'system'
     );
 
@@ -551,6 +606,11 @@ async function startServer() {
       .prepare('SELECT * FROM players WHERE LOWER(username) = LOWER(?)')
       .get(username) as DbPlayer | undefined;
 
+    if (player?.banned) {
+      res.status(403).json({ error: 'This PLAYNOVA username has been suspended by an administrator.' });
+      return;
+    }
+
     if (!player || !player.recovery_key_hash || !verifySecret(recoveryKey, player.recovery_key_hash)) {
       res.status(401).json({ error: 'Username or Progress Save Key did not match any saved profile.' });
       return;
@@ -563,7 +623,7 @@ async function startServer() {
   });
 
   app.post('/api/profile/recovery-key', requirePlayer, (req: AuthedPlayerRequest, res) => {
-    const recoveryKey = `GV-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    const recoveryKey = `PN-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
     db.prepare('UPDATE players SET recovery_key_hash = ?, updated_at = ? WHERE id = ?').run(
       hashSecret(recoveryKey),
       new Date().toISOString(),
@@ -683,6 +743,105 @@ async function startServer() {
     );
     const updated = db.prepare('SELECT * FROM players WHERE id = ?').get(req.player!.id) as DbPlayer;
     res.json({ ok: true, player: sanitizePlayer(updated) });
+  });
+
+  app.patch('/api/profile/avatar', requirePlayer, (req: AuthedPlayerRequest, res) => {
+    const current: AvatarConfig = {
+      ...DEFAULT_AVATAR_CONFIG,
+      ...(JSON.parse(req.player!.avatar_config_json || '{}') as Partial<AvatarConfig>),
+    };
+    const body = (req.body || {}) as Partial<AvatarConfig>;
+    const validEmblems: AvatarConfig['emblem'][] = [
+      'nova',
+      'crown',
+      'bolt',
+      'shield',
+      'cyber',
+      'chess',
+      'phoenix',
+      'atom',
+    ];
+    const hexRx = /^#[0-9A-Fa-f]{6}$/;
+
+    const owned = new Set(JSON.parse(req.player!.unlocked_cosmetics_json || '["frame_slate","theme_midnight_nova"]') as string[]);
+    let nextTheme = req.player!.profile_theme || 'theme_midnight_nova';
+    if (typeof body.themeId === 'string' && body.themeId.trim()) {
+      const candidateTheme = body.themeId.trim();
+      const row = db
+        .prepare("SELECT id, coin_cost FROM reward_catalog WHERE id = ? AND category = 'theme'")
+        .get(candidateTheme) as { id: string; coin_cost: number } | undefined;
+      if (row && (owned.has(row.id) || row.coin_cost === 0)) {
+        nextTheme = row.id;
+      }
+    }
+
+    const nextAvatar: AvatarConfig = {
+      mode: body.mode === 'photo' ? 'photo' : body.mode === 'emblem' ? 'emblem' : current.mode,
+      emblem: body.emblem && validEmblems.includes(body.emblem) ? body.emblem : current.emblem,
+      bgHex: typeof body.bgHex === 'string' && hexRx.test(body.bgHex) ? body.bgHex : current.bgHex,
+      accentHex: typeof body.accentHex === 'string' && hexRx.test(body.accentHex) ? body.accentHex : current.accentHex,
+      themeId: nextTheme,
+    };
+
+    db.prepare('UPDATE players SET avatar_config_json = ?, profile_theme = ?, updated_at = ? WHERE id = ?').run(
+      JSON.stringify(nextAvatar),
+      nextTheme,
+      new Date().toISOString(),
+      req.player!.id
+    );
+    const updated = db.prepare('SELECT * FROM players WHERE id = ?').get(req.player!.id) as DbPlayer;
+    res.json({ ok: true, player: sanitizePlayer(updated) });
+  });
+
+  app.patch('/api/profile/favorites', requirePlayer, (req: AuthedPlayerRequest, res) => {
+    const incoming = Array.isArray(req.body?.favoriteGames) ? req.body.favoriteGames : [];
+    const filtered = Array.from(
+      new Set(incoming.filter((g: unknown): g is GameId => typeof g === 'string' && ALL_GAME_IDS.includes(g as GameId)))
+    ).slice(0, 12);
+
+    db.prepare('UPDATE players SET favorite_games_json = ?, updated_at = ? WHERE id = ?').run(
+      JSON.stringify(filtered),
+      new Date().toISOString(),
+      req.player!.id
+    );
+    const updated = db.prepare('SELECT * FROM players WHERE id = ?').get(req.player!.id) as DbPlayer;
+    res.json({ ok: true, player: sanitizePlayer(updated) });
+  });
+
+  app.get('/api/wallet/transactions', requirePlayer, (req: AuthedPlayerRequest, res) => {
+    const transactions = db
+      .prepare(
+        `SELECT id, amount, balance_after as balanceAfter, category, description, created_at as createdAt
+         FROM coin_transactions
+         WHERE player_id = ?
+         ORDER BY created_at DESC
+         LIMIT 50`
+      )
+      .all(req.player!.id) as CoinTransactionItem[];
+
+    const totals = db
+      .prepare(
+        `SELECT COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) as totalEarned,
+                COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) as totalSpent
+         FROM coin_transactions
+         WHERE player_id = ?`
+      )
+      .get(req.player!.id) as { totalEarned: number; totalSpent: number };
+
+    res.json({
+      ok: true,
+      currentCoins: req.player!.coins,
+      totalEarned: totals.totalEarned ?? 0,
+      totalSpent: totals.totalSpent ?? 0,
+      transactions,
+    });
+  });
+
+  app.get('/api/announcements', (_req, res) => {
+    const announcements = db
+      .prepare('SELECT id, title, message, level, created_at as createdAt FROM platform_announcements ORDER BY created_at DESC LIMIT 12')
+      .all();
+    res.json({ announcements });
   });
 
   // =========================================================================
@@ -1170,6 +1329,68 @@ async function startServer() {
     });
   });
 
+  app.post('/api/games/complete', requirePlayer, rateLimit('game_complete', 60, 60_000), (req: AuthedPlayerRequest, res) => {
+    const rawGame = typeof req.body?.gameId === 'string' ? req.body.gameId : typeof req.body?.game === 'string' ? req.body.game : '';
+    if (!ALL_GAME_IDS.includes(rawGame as GameId)) {
+      res.status(400).json({ error: 'Invalid game identifier.' });
+      return;
+    }
+    const gameId = rawGame as GameId;
+    const outcome: 'win' | 'loss' | 'draw' =
+      req.body?.outcome === 'win' || req.body?.outcome === 'loss' || req.body?.outcome === 'draw'
+        ? req.body.outcome
+        : 'win';
+    const difficulty: DifficultyLevel =
+      req.body?.difficulty === 'easy' || req.body?.difficulty === 'hard' ? req.body.difficulty : 'medium';
+    const mode = typeof req.body?.mode === 'string' && req.body.mode.trim() ? req.body.mode.trim().slice(0, 40) : 'solo';
+    const opponentLabel =
+      typeof req.body?.opponentLabel === 'string' && req.body.opponentLabel.trim()
+        ? req.body.opponentLabel.trim().slice(0, 80)
+        : 'PLAYNOVA Arena';
+
+    const rawScore = Number(req.body?.scoreDelta ?? 0);
+    const maxScoreCap = outcome === 'win' ? 350 : outcome === 'draw' ? 140 : 60;
+    const defaultScore = outcome === 'win' ? (difficulty === 'hard' ? 150 : difficulty === 'medium' ? 110 : 80) : outcome === 'draw' ? 50 : 15;
+    const scoreDelta = Number.isFinite(rawScore) && rawScore > 0 ? Math.min(maxScoreCap, Math.round(rawScore)) : defaultScore;
+
+    const diffMult = difficulty === 'hard' ? 1.45 : difficulty === 'medium' ? 1.15 : 1;
+    const xpEarned = Math.round((outcome === 'win' ? 45 : outcome === 'draw' ? 24 : 12) * diffMult);
+    const coinsEarned = Math.round((outcome === 'win' ? 25 : outcome === 'draw' ? 12 : 5) * diffMult);
+
+    const rawDuration =
+      typeof req.body?.durationSec === 'number'
+        ? req.body.durationSec
+        : typeof req.body?.durationMs === 'number'
+        ? Math.round(req.body.durationMs / 1000)
+        : 30;
+    const durationSec = Math.max(1, Math.min(7200, Math.round(rawDuration || 30)));
+
+    const summary =
+      typeof req.body?.summary === 'string' && req.body.summary.trim()
+        ? req.body.summary.trim().slice(0, 160)
+        : `${gameId.replace('_', ' ')} (${outcome})`;
+
+    const progress = recordMatchAndProgress({
+      playerId: req.player!.id,
+      gameId,
+      mode,
+      difficulty,
+      outcome,
+      opponentLabel,
+      scoreDelta,
+      xpEarned,
+      coinsEarned,
+      durationSec,
+      summary,
+    });
+
+    res.json({
+      ok: true,
+      rewards: { scoreDelta, xpEarned, coinsEarned },
+      ...progress,
+    });
+  });
+
   // =========================================================================
   // 04. PROGRESSION, CHALLENGES, ACHIEVEMENTS, REWARDS, NOTIFICATIONS, LEADERBOARD
   // =========================================================================
@@ -1239,7 +1460,9 @@ async function startServer() {
       unlockedAt: unlockedMap.get(a.key) || null,
     }));
 
-    const owned = new Set(JSON.parse(req.player!.unlocked_cosmetics_json || '["frame_slate"]') as string[]);
+    const owned = new Set(
+      JSON.parse(req.player!.unlocked_cosmetics_json || '["frame_slate","theme_midnight_nova"]') as string[]
+    );
     const rewardRows = db.prepare('SELECT * FROM reward_catalog ORDER BY coin_cost ASC').all() as Array<{
       id: string;
       name: string;
@@ -1257,12 +1480,15 @@ async function startServer() {
       coinCost: r.coin_cost,
       accentHex: r.accent_hex,
       unlocked: owned.has(r.id) || r.coin_cost === 0,
-      equipped: req.player!.active_frame === r.id,
+      equipped:
+        r.category === 'theme'
+          ? (req.player!.profile_theme || 'theme_midnight_nova') === r.id
+          : req.player!.active_frame === r.id,
     }));
 
     const notifications = db
       .prepare(
-        'SELECT id, title, message, kind, read_at as readAt, created_at as createdAt FROM notifications WHERE player_id = ? ORDER BY created_at DESC LIMIT 20'
+        'SELECT id, title, message, kind, read_at as readAt, created_at as createdAt FROM notifications WHERE player_id = ? ORDER BY created_at DESC LIMIT 25'
       )
       .all(playerId);
 
@@ -1274,7 +1500,7 @@ async function startServer() {
          FROM match_records
          WHERE player_id = ?
          ORDER BY created_at DESC
-         LIMIT 25`
+         LIMIT 30`
       )
       .all(playerId);
 
@@ -1284,7 +1510,7 @@ async function startServer() {
   app.post('/api/rewards/:id/unlock', requirePlayer, (req: AuthedPlayerRequest, res) => {
     const rewardId = req.params.id;
     const reward = db.prepare('SELECT * FROM reward_catalog WHERE id = ?').get(rewardId) as
-      | { id: string; name: string; coin_cost: number }
+      | { id: string; name: string; category: 'frame' | 'title' | 'theme'; coin_cost: number }
       | undefined;
 
     if (!reward) {
@@ -1292,35 +1518,67 @@ async function startServer() {
       return;
     }
 
-    const owned = new Set(JSON.parse(req.player!.unlocked_cosmetics_json || '["frame_slate"]') as string[]);
-    if (!owned.has(reward.id)) {
+    const owned = new Set(
+      JSON.parse(req.player!.unlocked_cosmetics_json || '["frame_slate","theme_midnight_nova"]') as string[]
+    );
+    const now = new Date().toISOString();
+    const isTheme = reward.category === 'theme';
+
+    if (!owned.has(reward.id) && reward.coin_cost > 0) {
       if (req.player!.coins < reward.coin_cost) {
-        res.status(400).json({ error: `Need ${reward.coin_cost} coins to unlock ${reward.name}.` });
+        res.status(400).json({ error: `Need ${reward.coin_cost} Virtual Coins to unlock ${reward.name}.` });
         return;
       }
       owned.add(reward.id);
-      db.prepare(
-        'UPDATE players SET coins = coins - ?, unlocked_cosmetics_json = ?, active_frame = ?, updated_at = ? WHERE id = ?'
-      ).run(
-        reward.coin_cost,
-        JSON.stringify(Array.from(owned)),
-        reward.id,
-        new Date().toISOString(),
-        req.player!.id
-      );
+      const nextCoins = req.player!.coins - reward.coin_cost;
+      if (isTheme) {
+        const avatarCfg: AvatarConfig = {
+          ...DEFAULT_AVATAR_CONFIG,
+          ...(JSON.parse(req.player!.avatar_config_json || '{}') as Partial<AvatarConfig>),
+          themeId: reward.id,
+        };
+        db.prepare(
+          'UPDATE players SET coins = ?, unlocked_cosmetics_json = ?, profile_theme = ?, avatar_config_json = ?, updated_at = ? WHERE id = ?'
+        ).run(nextCoins, JSON.stringify(Array.from(owned)), reward.id, JSON.stringify(avatarCfg), now, req.player!.id);
+      } else {
+        db.prepare(
+          'UPDATE players SET coins = ?, unlocked_cosmetics_json = ?, active_frame = ?, updated_at = ? WHERE id = ?'
+        ).run(nextCoins, JSON.stringify(Array.from(owned)), reward.id, now, req.player!.id);
+      }
+      logCoinTransaction({
+        playerId: req.player!.id,
+        amount: -reward.coin_cost,
+        balanceAfter: nextCoins,
+        category: 'shop',
+        description: `Unlocked ${reward.name}`,
+      });
       unlockAchievement(req.player!.id, 'collector_cosmetic');
       createNotification(
         req.player!.id,
         `Reward Unlocked: ${reward.name}`,
-        `Equipped on your profile badge (-${reward.coin_cost} Coins).`,
+        `Equipped on your PLAYNOVA profile (-${reward.coin_cost} Virtual Coins).`,
         'reward'
       );
     } else {
-      db.prepare('UPDATE players SET active_frame = ?, updated_at = ? WHERE id = ?').run(
-        reward.id,
-        new Date().toISOString(),
-        req.player!.id
-      );
+      if (isTheme) {
+        const avatarCfg: AvatarConfig = {
+          ...DEFAULT_AVATAR_CONFIG,
+          ...(JSON.parse(req.player!.avatar_config_json || '{}') as Partial<AvatarConfig>),
+          themeId: reward.id,
+        };
+        db.prepare('UPDATE players SET profile_theme = ?, avatar_config_json = ?, updated_at = ? WHERE id = ?').run(
+          reward.id,
+          JSON.stringify(avatarCfg),
+          now,
+          req.player!.id
+        );
+      } else {
+        db.prepare('UPDATE players SET active_frame = ?, updated_at = ? WHERE id = ?').run(
+          reward.id,
+          now,
+          req.player!.id
+        );
+      }
     }
 
     const updated = db.prepare('SELECT * FROM players WHERE id = ?').get(req.player!.id) as DbPlayer;
@@ -1338,15 +1596,17 @@ async function startServer() {
   app.get('/api/leaderboard', (req, res) => {
     const auth = getAuthenticatedPlayer(req);
     if (auth.expired) {
-      res.status(401).json({ code: 'SESSION_EXPIRED', error: 'Your session expired. Re-enter to continue.' });
+      res.status(401).json({ code: 'SESSION_EXPIRED', error: 'Your session expired. Enter your username to continue.' });
       return;
     }
     const currentPlayerId = auth.player?.id || null;
     const gameFilter = String(req.query.game || 'all');
-    const periodFilter = req.query.period === 'weekly' ? 'weekly' : 'all';
-    const sinceIso = periodFilter === 'weekly' ? new Date(Date.now() - 7 * 86400 * 1000).toISOString() : '1970-01-01T00:00:00.000Z';
+    const periodFilter =
+      req.query.period === 'weekly' ? 'weekly' : req.query.period === 'monthly' ? 'monthly' : 'all';
+    const days = periodFilter === 'weekly' ? 7 : periodFilter === 'monthly' ? 30 : 0;
+    const sinceIso = days > 0 ? new Date(Date.now() - days * 86400 * 1000).toISOString() : '1970-01-01T00:00:00.000Z';
 
-    const validGame = ['tictactoe', 'rps', 'guess_number'].includes(gameFilter);
+    const validGame = ALL_GAME_IDS.includes(gameFilter as GameId);
 
     const rows = db
       .prepare(
@@ -1358,6 +1618,7 @@ async function startServer() {
                 (SELECT COUNT(*) FROM player_achievements pa WHERE pa.player_id = p.id) as achievementsCount
          FROM players p
          LEFT JOIN match_records m ON m.player_id = p.id
+         WHERE p.banned = 0
          GROUP BY p.id
          ORDER BY filteredPoints DESC, p.xp DESC
          LIMIT 50`
@@ -1396,6 +1657,324 @@ async function startServer() {
         achievementsCount: r.achievementsCount ?? 0,
         isCurrentPlayer: Boolean(currentPlayerId && r.playerId === currentPlayerId),
       })),
+    });
+  });
+
+  // =========================================================================
+  // 04B. TOURNAMENTS & COMPETITIONS (REAL SCHEDULED + EXHIBITION AI BRACKETS)
+  // =========================================================================
+
+  function seedTournamentBracket(tournamentId: string) {
+    const parts = db
+      .prepare('SELECT id, player_id, username, is_ai, seed FROM tournament_participants WHERE tournament_id = ? ORDER BY seed ASC')
+      .all(tournamentId) as Array<{
+      id: string;
+      player_id: string | null;
+      username: string;
+      is_ai: number;
+      seed: number;
+    }>;
+    if (parts.length < 2) return;
+
+    const now = new Date().toISOString();
+    db.prepare('DELETE FROM tournament_matches WHERE tournament_id = ?').run(tournamentId);
+    const totalMatchesR1 = Math.floor(parts.length / 2);
+    for (let i = 0; i < totalMatchesR1; i++) {
+      const a = parts[i * 2];
+      const b = parts[i * 2 + 1];
+      db.prepare(
+        `INSERT INTO tournament_matches
+         (id, tournament_id, round_number, match_order, player_a_id, player_b_id, player_a_name, player_b_name, status, updated_at)
+         VALUES (?, ?, 1, ?, ?, ?, ?, ?, 'ready', ?)`
+      ).run(
+        crypto.randomUUID(),
+        tournamentId,
+        i + 1,
+        a.player_id || a.id,
+        b.player_id || b.id,
+        a.username,
+        b.username,
+        now
+      );
+    }
+    db.prepare("UPDATE tournaments SET status = 'active', updated_at = ? WHERE id = ?").run(now, tournamentId);
+  }
+
+  app.get('/api/tournaments', (req, res) => {
+    const auth = getAuthenticatedPlayer(req);
+    res.json({
+      tournaments: listTournaments(auth.player?.id || null),
+    });
+  });
+
+  app.post('/api/tournaments', requirePlayer, (req: AuthedPlayerRequest, res) => {
+    const title = String(req.body?.title || '').trim().slice(0, 70);
+    const gameId = String(req.body?.gameId || 'tictactoe') as GameId;
+    const maxPlayers = Number(req.body?.maxPlayers) === 8 ? 8 : 4;
+    const entryFeeCoins = Math.max(0, Math.min(500, Math.round(Number(req.body?.entryFeeCoins ?? 0))));
+    const prizeCoins = Math.max(50, Math.min(2000, Math.round(Number(req.body?.prizeCoins ?? 200))));
+    const description =
+      String(req.body?.description || '').trim().slice(0, 220) ||
+      'Player-organized single-elimination bracket on PLAYNOVA.';
+
+    if (title.length < 4 || !ALL_GAME_IDS.includes(gameId)) {
+      res.status(400).json({ error: 'Provide a valid tournament title (4+ characters) and game arena.' });
+      return;
+    }
+
+    const id = `tour_${crypto.randomBytes(5).toString('hex')}`;
+    const now = new Date().toISOString();
+    const startsAt = new Date(Date.now() + 3600_000).toISOString();
+
+    db.prepare(
+      `INSERT INTO tournaments
+       (id, title, game_id, competition_type, status, max_players, entry_fee_coins, prize_coins, starts_at, description, created_at, updated_at)
+       VALUES (?, ?, ?, 'scheduled', 'registration', ?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, title, gameId, maxPlayers, entryFeeCoins, prizeCoins, startsAt, description, now, now);
+
+    db.prepare(
+      'INSERT INTO tournament_participants (id, tournament_id, player_id, username, is_ai, seed, eliminated, joined_at) VALUES (?, ?, ?, ?, 0, 1, 0, ?)'
+    ).run(crypto.randomUUID(), id, req.player!.id, req.player!.username, now);
+
+    res.status(201).json({
+      ok: true,
+      tournamentId: id,
+      tournaments: listTournaments(req.player!.id),
+    });
+  });
+
+  app.post('/api/tournaments/:id/register', requirePlayer, (req: AuthedPlayerRequest, res) => {
+    const tId = req.params.id;
+    const t = db.prepare('SELECT * FROM tournaments WHERE id = ?').get(tId) as
+      | {
+          id: string;
+          title: string;
+          status: string;
+          max_players: number;
+          entry_fee_coins: number;
+          competition_type: string;
+        }
+      | undefined;
+    if (!t || t.status !== 'registration') {
+      res.status(400).json({ error: 'Tournament registration is closed.' });
+      return;
+    }
+
+    const already = db
+      .prepare('SELECT id FROM tournament_participants WHERE tournament_id = ? AND player_id = ?')
+      .get(tId, req.player!.id);
+    if (already) {
+      res.status(409).json({ error: 'You are already registered in this tournament.' });
+      return;
+    }
+
+    const countRow = db
+      .prepare('SELECT COUNT(*) as c FROM tournament_participants WHERE tournament_id = ?')
+      .get(tId) as { c: number };
+    if (countRow.c >= t.max_players) {
+      res.status(400).json({ error: 'This tournament bracket is already full.' });
+      return;
+    }
+
+    if (t.entry_fee_coins > 0 && req.player!.coins < t.entry_fee_coins) {
+      res.status(400).json({ error: `Need ${t.entry_fee_coins} Virtual Coins to enter ${t.title}.` });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    if (t.entry_fee_coins > 0) {
+      const nextCoins = req.player!.coins - t.entry_fee_coins;
+      db.prepare('UPDATE players SET coins = ?, updated_at = ? WHERE id = ?').run(nextCoins, now, req.player!.id);
+      logCoinTransaction({
+        playerId: req.player!.id,
+        amount: -t.entry_fee_coins,
+        balanceAfter: nextCoins,
+        category: 'tournament',
+        description: `Entry fee: ${t.title}`,
+      });
+    }
+
+    db.prepare(
+      'INSERT INTO tournament_participants (id, tournament_id, player_id, username, is_ai, seed, eliminated, joined_at) VALUES (?, ?, ?, ?, 0, ?, 0, ?)'
+    ).run(crypto.randomUUID(), tId, req.player!.id, req.player!.username, countRow.c + 1, now);
+
+    createNotification(
+      req.player!.id,
+      `Tournament Registered: ${t.title}`,
+      'You secured a seed in the bracket. Play your round when the bracket activates.',
+      'tournament'
+    );
+
+    if (countRow.c + 1 >= t.max_players) {
+      seedTournamentBracket(tId);
+    }
+
+    const updated = db.prepare('SELECT * FROM players WHERE id = ?').get(req.player!.id) as DbPlayer;
+    res.json({
+      ok: true,
+      player: sanitizePlayer(updated),
+      tournaments: listTournaments(req.player!.id),
+    });
+  });
+
+  app.post('/api/tournaments/launch-exhibition', requirePlayer, (req: AuthedPlayerRequest, res) => {
+    const gameId = (ALL_GAME_IDS.includes(req.body?.gameId as GameId) ? req.body.gameId : 'tictactoe') as GameId;
+    const gameMeta = GAME_CATALOG.find((g) => g.id === gameId)!;
+    const tId = `exh_${crypto.randomBytes(5).toString('hex')}`;
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO tournaments
+       (id, title, game_id, competition_type, status, max_players, entry_fee_coins, prize_coins, starts_at, description, created_at, updated_at)
+       VALUES (?, ?, ?, 'exhibition_demo', 'active', 4, 0, 140, ?, ?, ?, ?)`
+    ).run(
+      tId,
+      `${gameMeta.name} Exhibition Cup (Demo AI Bracket)`,
+      gameId,
+      now,
+      'Instant 4-seed practice bracket pitting you against 3 clearly labeled Exhibition AI bots. Win 2 rounds to claim the 140 Coin exhibition purse.',
+      now,
+      now
+    );
+
+    const participants = [
+      { id: crypto.randomUUID(), playerId: req.player!.id, username: req.player!.username, isAi: 0, seed: 1 },
+      { id: crypto.randomUUID(), playerId: null, username: 'Nova Tactician (Demo AI)', isAi: 1, seed: 2 },
+      { id: crypto.randomUUID(), playerId: null, username: 'Cyber Sentinel (Demo AI)', isAi: 1, seed: 3 },
+      { id: crypto.randomUUID(), playerId: null, username: 'Orbit Striker (Demo AI)', isAi: 1, seed: 4 },
+    ];
+    for (const p of participants) {
+      db.prepare(
+        'INSERT INTO tournament_participants (id, tournament_id, player_id, username, is_ai, seed, eliminated, joined_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)'
+      ).run(p.id, tId, p.playerId, p.username, p.isAi, p.seed, now);
+    }
+
+    seedTournamentBracket(tId);
+    res.status(201).json({
+      ok: true,
+      tournamentId: tId,
+      tournaments: listTournaments(req.player!.id),
+    });
+  });
+
+  app.post('/api/tournaments/:id/matches/:matchId/resolve', requirePlayer, (req: AuthedPlayerRequest, res) => {
+    const { id: tId, matchId } = req.params;
+    const t = db.prepare('SELECT * FROM tournaments WHERE id = ?').get(tId) as
+      | { id: string; title: string; game_id: GameId; status: string; max_players: number; prize_coins: number }
+      | undefined;
+    const match = db
+      .prepare('SELECT * FROM tournament_matches WHERE id = ? AND tournament_id = ?')
+      .get(matchId, tId) as
+      | {
+          id: string;
+          round_number: number;
+          match_order: number;
+          player_a_id: string | null;
+          player_b_id: string | null;
+          player_a_name: string;
+          player_b_name: string;
+          status: string;
+        }
+      | undefined;
+
+    if (!t || !match || match.status === 'completed') {
+      res.status(400).json({ error: 'Tournament match is already completed or unavailable.' });
+      return;
+    }
+
+    const winnerSide = req.body?.winnerSide === 'b' ? 'b' : 'a';
+    const involvesPlayer = match.player_a_id === req.player!.id || match.player_b_id === req.player!.id;
+    const isAiVsAi = match.player_a_name.includes('(Demo AI)') && match.player_b_name.includes('(Demo AI)');
+    if (!involvesPlayer && !isAiVsAi) {
+      res.status(403).json({ error: 'You can only report outcomes for your own bracket match or simulate Demo AI pairings.' });
+      return;
+    }
+
+    const winnerId = winnerSide === 'a' ? match.player_a_id : match.player_b_id;
+    const winnerName = winnerSide === 'a' ? match.player_a_name : match.player_b_name;
+    const loserName = winnerSide === 'a' ? match.player_b_name : match.player_a_name;
+    const scoreText = String(req.body?.scoreText || 'Match Won').trim().slice(0, 40);
+    const now = new Date().toISOString();
+
+    db.prepare(
+      "UPDATE tournament_matches SET winner_id = ?, winner_name = ?, status = 'completed', score_text = ?, updated_at = ? WHERE id = ?"
+    ).run(winnerId, winnerName, scoreText, now, match.id);
+
+    db.prepare(
+      'UPDATE tournament_participants SET eliminated = 1 WHERE tournament_id = ? AND username = ?'
+    ).run(tId, loserName);
+
+    // Check if current round is completely finished -> generate next round or finish tournament
+    const roundMatches = db
+      .prepare('SELECT * FROM tournament_matches WHERE tournament_id = ? AND round_number = ? ORDER BY match_order ASC')
+      .all(tId, match.round_number) as Array<{
+      winner_id: string | null;
+      winner_name: string | null;
+      status: string;
+    }>;
+
+    if (roundMatches.every((rm) => rm.status === 'completed')) {
+      if (roundMatches.length === 1) {
+        // Championship Final complete!
+        db.prepare(
+          "UPDATE tournaments SET status = 'completed', winner_player_id = ?, winner_username = ?, updated_at = ? WHERE id = ?"
+        ).run(winnerId, winnerName, now, tId);
+
+        if (winnerId && !winnerName.includes('(Demo AI)')) {
+          const champ = db.prepare('SELECT id, coins FROM players WHERE id = ?').get(winnerId) as
+            | { id: string; coins: number }
+            | undefined;
+          if (champ) {
+            const nextCoins = champ.coins + t.prize_coins;
+            db.prepare('UPDATE players SET coins = ?, xp = xp + 120, points = points + 150, updated_at = ? WHERE id = ?').run(
+              nextCoins,
+              now,
+              champ.id
+            );
+            logCoinTransaction({
+              playerId: champ.id,
+              amount: t.prize_coins,
+              balanceAfter: nextCoins,
+              category: 'tournament',
+              description: `Champion prize: ${t.title}`,
+            });
+            createNotification(
+              champ.id,
+              `Tournament Champion: ${t.title}`,
+              `You won the bracket and claimed +${t.prize_coins} Virtual Coins!`,
+              'tournament'
+            );
+          }
+        }
+      } else {
+        const nextRound = match.round_number + 1;
+        for (let i = 0; i < Math.floor(roundMatches.length / 2); i++) {
+          const left = roundMatches[i * 2];
+          const right = roundMatches[i * 2 + 1];
+          db.prepare(
+            `INSERT INTO tournament_matches
+             (id, tournament_id, round_number, match_order, player_a_id, player_b_id, player_a_name, player_b_name, status, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?)`
+          ).run(
+            crypto.randomUUID(),
+            tId,
+            nextRound,
+            i + 1,
+            left.winner_id,
+            right.winner_id,
+            left.winner_name || 'TBD',
+            right.winner_name || 'TBD',
+            now
+          );
+        }
+      }
+    }
+
+    const updated = db.prepare('SELECT * FROM players WHERE id = ?').get(req.player!.id) as DbPlayer;
+    res.json({
+      ok: true,
+      player: sanitizePlayer(updated),
+      tournaments: listTournaments(req.player!.id),
     });
   });
 
@@ -1808,6 +2387,7 @@ async function startServer() {
       db.prepare('SELECT COUNT(*) as c FROM player_sessions WHERE expires_at > ?').get(now) as { c: number }
     ).c;
     const totalMatches = (db.prepare('SELECT COUNT(*) as c FROM match_records').get() as { c: number }).c;
+    const totalTournaments = (db.prepare('SELECT COUNT(*) as c FROM tournaments').get() as { c: number }).c;
     const lpTotals = db
       .prepare(
         `SELECT COUNT(*) as total,
@@ -1820,7 +2400,7 @@ async function startServer() {
 
     const players = db
       .prepare(
-        `SELECT p.id, p.username, p.level, p.points, p.coins,
+        `SELECT p.id, p.username, p.level, p.points, p.coins, p.banned,
                 p.last_seen_at as lastSeenAt, COUNT(m.id) as totalMatches
          FROM players p
          LEFT JOIN match_records m ON m.player_id = p.id
@@ -1828,7 +2408,27 @@ async function startServer() {
          ORDER BY p.last_seen_at DESC
          LIMIT 50`
       )
-      .all();
+      .all()
+      .map((r) => {
+        const row = r as Record<string, unknown>;
+        return { ...row, banned: Boolean(row.banned) };
+      });
+
+    const gameBreakdownRows = db
+      .prepare(
+        `SELECT game_id as gameId, COUNT(*) as matches,
+                SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) as wins
+         FROM match_records
+         GROUP BY game_id`
+      )
+      .all() as Array<{ gameId: GameId; matches: number; wins: number }>;
+
+    const gameBreakdownMap = new Map(gameBreakdownRows.map((g) => [g.gameId, g]));
+    const gameBreakdown = ALL_GAME_IDS.map((gid) => ({
+      gameId: gid,
+      matches: gameBreakdownMap.get(gid)?.matches ?? 0,
+      wins: gameBreakdownMap.get(gid)?.wins ?? 0,
+    }));
 
     const sessions = db
       .prepare(
@@ -1876,6 +2476,10 @@ async function startServer() {
       )
       .all();
 
+    const announcements = db
+      .prepare('SELECT id, title, message, level, created_at as createdAt FROM platform_announcements ORDER BY created_at DESC LIMIT 20')
+      .all();
+
     const linkPreviewLogs = db
       .prepare(
         `SELECT l.id, l.url, l.status, l.fallback_reason as fallbackReason, l.latency_ms as latencyMs,
@@ -1899,6 +2503,7 @@ async function startServer() {
         activeRooms: rt.activeRooms,
         queuedPlayers: rt.queuedPlayers,
         totalMatches,
+        totalTournaments,
         totalLinkPreviews: lpTotals.total ?? 0,
         failedLinkPreviews: lpTotals.failed ?? 0,
         dbSizeBytes,
@@ -1906,8 +2511,11 @@ async function startServer() {
         uptimeSec: Math.round((Date.now() - SERVER_STARTED_AT) / 1000),
       },
       players,
+      gameBreakdown,
       sessions,
       liveRooms: rt.liveRooms,
+      tournaments: listTournaments(null),
+      announcements,
       recentActivity,
       challenges,
       achievements,
@@ -1915,6 +2523,126 @@ async function startServer() {
       linkPreviewLogs,
       errorLogs,
     });
+  });
+
+  app.post('/api/admin/players/:id/coins', requireAdmin, (req, res) => {
+    const player = db.prepare('SELECT id, username, coins FROM players WHERE id = ?').get(req.params.id) as
+      | { id: string; username: string; coins: number }
+      | undefined;
+    if (!player) {
+      res.status(404).json({ error: 'Player not found.' });
+      return;
+    }
+    const delta = Math.max(-10000, Math.min(10000, Math.round(Number(req.body?.amount ?? 0))));
+    if (!delta) {
+      res.status(400).json({ error: 'Enter a non-zero coin adjustment.' });
+      return;
+    }
+    const reason = String(req.body?.reason || 'Admin coin adjustment').trim().slice(0, 120);
+    const nextCoins = Math.max(0, player.coins + delta);
+    const now = new Date().toISOString();
+    db.prepare('UPDATE players SET coins = ?, updated_at = ? WHERE id = ?').run(nextCoins, now, player.id);
+
+    logCoinTransaction({
+      playerId: player.id,
+      amount: nextCoins - player.coins,
+      balanceAfter: nextCoins,
+      category: 'admin',
+      description: reason,
+    });
+    createNotification(
+      player.id,
+      delta > 0 ? `Virtual Coin Grant (+${delta})` : `Virtual Coin Adjustment (${delta})`,
+      `${reason}. Current balance: ${nextCoins} Coins.`,
+      'reward'
+    );
+    res.json({ ok: true, coins: nextCoins });
+  });
+
+  app.patch('/api/admin/players/:id/moderate', requireAdmin, (req, res) => {
+    const player = db.prepare('SELECT id FROM players WHERE id = ?').get(req.params.id) as { id: string } | undefined;
+    if (!player) {
+      res.status(404).json({ error: 'Player not found.' });
+      return;
+    }
+    const banned = req.body?.banned === true ? 1 : 0;
+    db.prepare('UPDATE players SET banned = ?, updated_at = ? WHERE id = ?').run(
+      banned,
+      new Date().toISOString(),
+      player.id
+    );
+    if (banned) {
+      db.prepare('DELETE FROM player_sessions WHERE player_id = ?').run(player.id);
+    }
+    res.json({ ok: true, banned: Boolean(banned) });
+  });
+
+  app.post('/api/admin/announcements', requireAdmin, (req, res) => {
+    const title = String(req.body?.title || '').trim().slice(0, 80);
+    const message = String(req.body?.message || '').trim().slice(0, 320);
+    const level = ['info', 'event', 'alert'].includes(req.body?.level) ? req.body.level : 'info';
+    if (title.length < 3 || message.length < 5) {
+      res.status(400).json({ error: 'Provide both an announcement title and message.' });
+      return;
+    }
+    const id = crypto.randomUUID();
+    const now = new Date().toISOString();
+    db.prepare('INSERT INTO platform_announcements (id, title, message, level, created_at) VALUES (?, ?, ?, ?, ?)').run(
+      id,
+      title,
+      message,
+      level,
+      now
+    );
+    const activePlayers = db.prepare('SELECT id FROM players WHERE banned = 0 LIMIT 100').all() as Array<{ id: string }>;
+    for (const p of activePlayers) {
+      createNotification(p.id, title, message, 'announcement');
+    }
+    res.status(201).json({ ok: true, id });
+  });
+
+  app.delete('/api/admin/announcements/:id', requireAdmin, (req, res) => {
+    db.prepare('DELETE FROM platform_announcements WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/admin/tournaments', requireAdmin, (req, res) => {
+    const title = String(req.body?.title || '').trim().slice(0, 70);
+    const gameId = String(req.body?.gameId || 'tictactoe') as GameId;
+    const competitionType = req.body?.competitionType === 'exhibition_demo' ? 'exhibition_demo' : 'scheduled';
+    const maxPlayers = Number(req.body?.maxPlayers) === 8 ? 8 : 4;
+    const entryFeeCoins = Math.max(0, Math.min(500, Math.round(Number(req.body?.entryFeeCoins ?? 0))));
+    const prizeCoins = Math.max(50, Math.min(5000, Math.round(Number(req.body?.prizeCoins ?? 300))));
+    const description =
+      String(req.body?.description || '').trim().slice(0, 220) || 'Official PLAYNOVA scheduled tournament.';
+    if (title.length < 4 || !ALL_GAME_IDS.includes(gameId)) {
+      res.status(400).json({ error: 'Provide valid tournament title and game.' });
+      return;
+    }
+    const id = `tour_${crypto.randomBytes(5).toString('hex')}`;
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO tournaments
+       (id, title, game_id, competition_type, status, max_players, entry_fee_coins, prize_coins, starts_at, description, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'registration', ?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, title, gameId, competitionType, maxPlayers, entryFeeCoins, prizeCoins, new Date(Date.now() + 86400_000).toISOString(), description, now, now);
+    res.status(201).json({ ok: true, id });
+  });
+
+  app.post('/api/admin/tournaments/:id/start', requireAdmin, (req, res) => {
+    const tId = req.params.id;
+    const count = (db.prepare('SELECT COUNT(*) as c FROM tournament_participants WHERE tournament_id = ?').get(tId) as { c: number }).c;
+    if (count < 2) {
+      res.status(400).json({ error: 'Need at least 2 participants to start the bracket.' });
+      return;
+    }
+    seedTournamentBracket(tId);
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/admin/tournaments/:id', requireAdmin, (req, res) => {
+    db.prepare('DELETE FROM tournaments WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
   });
 
   app.delete('/api/admin/sessions/:id', requireAdmin, (req, res) => {
@@ -2006,7 +2734,19 @@ async function startServer() {
     });
 
     app.get(
-      ['/', '/lobby', '/multiplayer', '/games', '/games/:game', '/leaderboard', '/link-preview', '/profile', '/admin', '/share/:slug'],
+      [
+        '/',
+        '/lobby',
+        '/multiplayer',
+        '/tournaments',
+        '/games',
+        '/games/:game',
+        '/leaderboard',
+        '/link-preview',
+        '/profile',
+        '/admin',
+        '/share/:slug',
+      ],
       async (req, res, next) => {
       try {
         const templatePath = path.resolve(process.cwd(), 'index.html');
@@ -2058,11 +2798,11 @@ async function startServer() {
 
   const port = 3000;
   httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`GAMEVERSE server running on http://0.0.0.0:${port}`);
+    console.log(`PLAYNOVA server running on http://0.0.0.0:${port}`);
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start GAMEVERSE server:', err);
+  console.error('Failed to start PLAYNOVA server:', err);
   process.exit(1);
 });

@@ -4,6 +4,7 @@ import type {
   RoomInviteEvent,
   RoomState,
 } from '../types.ts';
+import type { PromoKind } from '../game/chessEngine.ts';
 import { getStoredPlayerToken } from './api.ts';
 
 export type WsConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
@@ -20,7 +21,7 @@ export interface RealtimeSnapshot {
 
 type Listener = (snapshot: RealtimeSnapshot) => void;
 
-class GameverseWsClient {
+class PlaynovaWsClient {
   private ws: WebSocket | null = null;
   private reconnectTimer: number | null = null;
   private pingTimer: number | null = null;
@@ -69,7 +70,11 @@ class GameverseWsClient {
   public connect(explicitToken?: string | null) {
     const token = explicitToken || getStoredPlayerToken();
     if (!token) return;
-    if (this.ws && this.activeToken === token && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+    if (
+      this.ws &&
+      this.activeToken === token &&
+      (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
@@ -148,7 +153,10 @@ class GameverseWsClient {
           break;
         case 'invite:received': {
           const invite = p as unknown as RoomInviteEvent;
-          const deduped = [invite, ...this.state.pendingInvites.filter((i) => i.roomId !== invite.roomId)].slice(0, 5);
+          const deduped = [invite, ...this.state.pendingInvites.filter((i) => i.roomId !== invite.roomId)].slice(
+            0,
+            5
+          );
           this.update({ pendingInvites: deduped });
           break;
         }
@@ -205,7 +213,7 @@ class GameverseWsClient {
 
   public emit(event: string, payload: Record<string, unknown> = {}) {
     if (!this.ws) {
-      this.update({ lastError: 'Reconnecting to GAMEVERSE multiplayer server...' });
+      this.update({ lastError: 'Reconnecting to PLAYNOVA multiplayer server...' });
       return;
     }
     if (this.ws.readyState === WebSocket.CONNECTING) {
@@ -213,7 +221,7 @@ class GameverseWsClient {
       return;
     }
     if (this.ws.readyState !== WebSocket.OPEN) {
-      this.update({ lastError: 'Reconnecting to GAMEVERSE multiplayer server...' });
+      this.update({ lastError: 'Reconnecting to PLAYNOVA multiplayer server...' });
       return;
     }
     this.ws.send(JSON.stringify({ event, payload }));
@@ -226,6 +234,18 @@ class GameverseWsClient {
   public joinRoomByCode(code: string) {
     this.emit('room:join', { code: code.trim().toUpperCase() });
   }
+
+  public sendChatMessage(text: string) {
+    this.emit('chat:send', { text });
+  }
+
+  public dropConnectFour(col: number) {
+    this.emit('c4:drop', { col });
+  }
+
+  public makeChessMove(from: number, to: number, promo?: PromoKind) {
+    this.emit('chess:move', { from, to, promo });
+  }
 }
 
-export const wsClient = new GameverseWsClient();
+export const wsClient = new PlaynovaWsClient();

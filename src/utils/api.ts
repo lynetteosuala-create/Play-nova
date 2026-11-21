@@ -44,22 +44,20 @@ export function setStoredAdminToken(token: string | null) {
   }
 }
 
-export function getStoredRecoveryKey(username: string): string | null {
+const GUEST_RECOVERY_KEY = 'gv_guest_recovery_key';
+
+export function getStoredRecoveryKey(): string | null {
   try {
-    const clean = username.trim().toLowerCase();
-    if (!clean) return null;
-    return localStorage.getItem(`gv_recovery_key_${clean}`);
+    return localStorage.getItem(GUEST_RECOVERY_KEY);
   } catch {
     return null;
   }
 }
 
-export function setStoredRecoveryKey(username: string, key: string | null) {
+export function setStoredRecoveryKey(key: string | null) {
   try {
-    const clean = username.trim().toLowerCase();
-    if (!clean) return;
-    if (key) localStorage.setItem(`gv_recovery_key_${clean}`, key);
-    else localStorage.removeItem(`gv_recovery_key_${clean}`);
+    if (key) localStorage.setItem(GUEST_RECOVERY_KEY, key);
+    else localStorage.removeItem(GUEST_RECOVERY_KEY);
   } catch {
     // ignore storage limits
   }

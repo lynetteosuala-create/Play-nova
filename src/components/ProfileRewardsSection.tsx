@@ -30,7 +30,7 @@ import type {
   MatchRecord,
   PlayerProfile,
 } from '../types.ts';
-import { apiFetch } from '../utils/api.ts';
+import { apiFetch, setStoredRecoveryKey } from '../utils/api.ts';
 import { soundFx } from '../utils/sound.ts';
 import { PlayerAvatar } from './PlayerAvatar.tsx';
 
@@ -116,8 +116,6 @@ export function ProfileRewardsSection({
   onRefreshProgression,
 }: ProfileRewardsSectionProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [usernameInput, setUsernameInput] = useState(player.username);
-  const [savingName, setSavingName] = useState(false);
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [unlockingId, setUnlockingId] = useState<string | null>(null);
@@ -138,9 +136,8 @@ export function ProfileRewardsSection({
   const [loadingWallet, setLoadingWallet] = useState(true);
 
   useEffect(() => {
-    setUsernameInput(player.username);
     setDraftAvatar(player.avatarConfig);
-  }, [player.username, player.avatarConfig]);
+  }, [player.avatarConfig]);
 
   const loadWallet = async () => {
     setLoadingWallet(true);
@@ -169,25 +166,6 @@ export function ProfileRewardsSection({
 
   const xpPercent = Math.min(100, Math.round((player.currentLevelXp / Math.max(1, player.nextLevelXp)) * 100));
   const unlockedCount = achievements.filter((a) => a.unlocked).length;
-
-  async function handleSaveUsername(e: React.FormEvent) {
-    e.preventDefault();
-    setSavingName(true);
-    setFeedback(null);
-    try {
-      const res = await apiFetch<{ ok: boolean; player: PlayerProfile }>('/api/profile/username', {
-        method: 'PATCH',
-        body: JSON.stringify({ username: usernameInput }),
-      });
-      onPlayerUpdated(res.player);
-      soundFx.playClick();
-      setFeedback({ type: 'ok', text: 'Display name updated.' });
-    } catch (err) {
-      setFeedback({ type: 'err', text: err instanceof Error ? err.message : 'Unable to update name.' });
-    } finally {
-      setSavingName(false);
-    }
-  }
 
   async function handleSaveAvatarConfig(nextCfg: AvatarConfig) {
     setSavingAvatar(true);
@@ -339,12 +317,13 @@ export function ProfileRewardsSection({
         { method: 'POST' }
       );
       onPlayerUpdated(res.player);
+      setStoredRecoveryKey(res.recoveryKey);
       setGeneratedKey(res.recoveryKey);
       setCopiedKey(false);
       soundFx.playReward();
       setFeedback({
         type: 'ok',
-        text: 'New Progress Save Key generated. Store it safely to restore your profile on any browser.',
+        text: 'New Progress Save Key generated. Store it safely to restore your anonymous guest progress anytime.',
       });
     } catch (err) {
       setFeedback({ type: 'err', text: err instanceof Error ? err.message : 'Unable to generate save key.' });
@@ -397,7 +376,7 @@ export function ProfileRewardsSection({
                 </span>
               </div>
               <p className="text-xs font-mono text-slate-400 truncate">
-                Username-only entry · Joined {new Date(player.createdAt).toLocaleDateString()}
+                Anonymous Guest ID {player.id.slice(0, 8).toUpperCase()} · Joined {new Date(player.createdAt).toLocaleDateString()}
               </p>
 
               <div className="flex flex-wrap gap-2 pt-1">
@@ -549,32 +528,6 @@ export function ProfileRewardsSection({
             </div>
           </div>
 
-          <form onSubmit={handleSaveUsername} className="border-t border-white/[0.08] pt-5">
-            <label htmlFor="pn-username-edit" className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Player Display Name
-            </label>
-            <div className="mt-2 flex flex-col gap-3 sm:flex-row">
-              <div className="relative flex-1">
-                <User className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-                <input
-                  id="pn-username-edit"
-                  type="text"
-                  value={usernameInput}
-                  onChange={(e) => setUsernameInput(e.target.value)}
-                  maxLength={24}
-                  className="w-full rounded-lg border border-white/[0.1] bg-[#060811] py-2 pl-9 pr-3 text-sm text-white focus:border-[#8B5CF6] focus:outline-none"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={savingName || usernameInput.trim() === player.username}
-                className="rounded-lg bg-[#8B5CF6] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#7C3AED] disabled:opacity-50 cursor-pointer"
-              >
-                {savingName ? 'Saving...' : 'Update Name'}
-              </button>
-            </div>
-          </form>
-
           {/* Audio & Motion Controls */}
           <div className="border-t border-white/[0.08] pt-5 space-y-4">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
@@ -654,7 +607,7 @@ export function ProfileRewardsSection({
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              No email or password is ever required to play PLAYNOVA. If you switch browsers or devices, enter your username + Progress Save Key on the Restore Progress modal to bring back your XP, coins, themes, frames, and rank.
+              No username, email, or password is ever required to play PLAYNOVA. Save this Progress Save Key to restore your anonymous XP, coins, themes, frames, and rank if your session expires.
             </p>
 
             {generatedKey && (

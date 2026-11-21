@@ -34,12 +34,13 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS players (
     id TEXT PRIMARY KEY,
     email TEXT UNIQUE,
-    username TEXT NOT NULL,
+    username TEXT NOT NULL DEFAULT 'Guest',
     password_hash TEXT,
     email_verified INTEGER NOT NULL DEFAULT 1,
     security_password_hash TEXT,
     security_password_enabled INTEGER NOT NULL DEFAULT 0,
     recovery_key_hash TEXT,
+    recovery_key_sha TEXT,
     xp INTEGER NOT NULL DEFAULT 0,
     level INTEGER NOT NULL DEFAULT 1,
     coins INTEGER NOT NULL DEFAULT 100,
@@ -59,7 +60,7 @@ db.exec(`
     last_seen_at TEXT NOT NULL
   );
 
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_players_username_nocase ON players(LOWER(username));
+  DROP INDEX IF EXISTS idx_players_username_nocase;
 
   CREATE TABLE IF NOT EXISTS player_sessions (
     id TEXT PRIMARY KEY,
@@ -392,12 +393,12 @@ function seedDefaults() {
       FROM players;
       DROP TABLE players;
       ALTER TABLE players_migrated RENAME TO players;
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_players_username_nocase ON players(LOWER(username));
       COMMIT;
     `);
     db.pragma('foreign_keys = ON');
   } else {
     if (!colMap.has('recovery_key_hash')) db.exec('ALTER TABLE players ADD COLUMN recovery_key_hash TEXT');
+    if (!colMap.has('recovery_key_sha')) db.exec('ALTER TABLE players ADD COLUMN recovery_key_sha TEXT');
     if (!colMap.has('profile_theme')) {
       db.exec("ALTER TABLE players ADD COLUMN profile_theme TEXT NOT NULL DEFAULT 'theme_midnight_nova'");
     }
@@ -411,6 +412,8 @@ function seedDefaults() {
       db.exec('ALTER TABLE players ADD COLUMN banned INTEGER NOT NULL DEFAULT 0');
     }
   }
+  db.exec('DROP INDEX IF EXISTS idx_players_username_nocase');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_players_recovery_sha ON players(recovery_key_sha)');
 
   const tttCols = db.prepare('PRAGMA table_info(active_ttt_sessions)').all() as Array<{ name: string }>;
   const tttColSet = new Set(tttCols.map((c) => c.name));
@@ -525,6 +528,7 @@ export interface DbPlayer {
   security_password_hash: string | null;
   security_password_enabled: number;
   recovery_key_hash: string | null;
+  recovery_key_sha?: string | null;
   xp: number;
   level: number;
   coins: number;

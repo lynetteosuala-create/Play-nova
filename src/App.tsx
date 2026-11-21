@@ -33,7 +33,6 @@ import { RockPaperScissorsGame } from './components/RockPaperScissorsGame.tsx';
 import { SessionRecoveryModal } from './components/SessionRecoveryModal.tsx';
 import { TicTacToeGame } from './components/TicTacToeGame.tsx';
 import { TournamentsSection } from './components/TournamentsSection.tsx';
-import { UsernameEntryModal } from './components/UsernameEntryModal.tsx';
 import { ChessGame } from './components/games/ChessGame.tsx';
 import { ConnectFourGame } from './components/games/ConnectFourGame.tsx';
 import { MemoryMatchGame } from './components/games/MemoryMatchGame.tsx';
@@ -58,7 +57,7 @@ import type {
   PlayerProfile,
   TournamentItem,
 } from './types.ts';
-import { apiFetch, getStoredPlayerToken, setStoredPlayerToken } from './utils/api.ts';
+import { apiFetch, getStoredPlayerToken, setStoredPlayerToken, setStoredRecoveryKey } from './utils/api.ts';
 import { soundFx } from './utils/sound.ts';
 import { wsClient, type RealtimeSnapshot } from './utils/wsClient.ts';
 
@@ -127,9 +126,7 @@ export function App() {
   const [selectedCategory, setSelectedCategory] = useState<'All' | GameCategory>('All');
   const [rt, setRt] = useState<RealtimeSnapshot>(wsClient.getSnapshot());
 
-  const [entryModalOpen, setEntryModalOpen] = useState(false);
-  const [entryPrompt, setEntryPrompt] = useState<string | undefined>(undefined);
-  const [pendingTargetView, setPendingTargetView] = useState<AppView | null>(null);
+  const [enteringGuest, setEnteringGuest] = useState(false);
   const [pendingRoomCode, setPendingRoomCode] = useState<string | null>(parseInitialRoomCode);
 
   const [publicStats, setPublicStats] = useState({
@@ -285,9 +282,22 @@ export function App() {
             navigate('multiplayer');
             window.setTimeout(() => wsClient.joinRoomByCode(codeToJoin), 250);
           }
-        } else if (pendingRoomCode) {
-          setEntryPrompt(`Enter your username to join live Multiplayer Room ${pendingRoomCode}.`);
-          setEntryModalOpen(true);
+        } else {
+          const currentInitialView = parseInitialView();
+          const needsGuest =
+            Boolean(pendingRoomCode) ||
+            currentInitialView === 'lobby' ||
+            currentInitialView === 'games' ||
+            currentInitialView === 'multiplayer' ||
+            currentInitialView === 'profile' ||
+            ALL_GAME_IDS.includes(currentInitialView as GameId);
+
+          if (needsGuest) {
+            await enterAsAnonymousGuest(
+              pendingRoomCode ? 'multiplayer' : currentInitialView,
+              pendingRoomCode
+            );
+          }
         }
       } catch (err) {
         const errData = err as Error & { status?: number };
@@ -321,7 +331,7 @@ export function App() {
       const custom = evt as CustomEvent<{ message?: string }>;
       setSessionExpiredModal({
         open: true,
-        message: custom.detail?.message || 'Your session expired. Restore your profile or pick a new username.',
+        message: custom.detail?.message || 'Your guest session expired. Restore your progress or launch a fresh guest session.',
       });
     }
     window.addEventListener('gv:session-expired', onSessionExpired);
@@ -333,31 +343,55 @@ export function App() {
     soundFx.configure(player.settings.soundEnabled, player.settings.soundVolume);
   }, [player]);
 
-  const handleAuthenticated = async (authedPlayer: PlayerProfile, token?: string) => {
+  const handleAuthenticated = async (
+    authedPlayer: PlayerProfile,
+    token?: string,
+    targetViewOverride?: AppView,
+    roomCodeOverride?: string | null
+  ) => {
     const activeToken = token || getStoredPlayerToken();
     if (activeToken) {
       setStoredPlayerToken(activeToken);
       wsClient.connect(activeToken);
     }
     setPlayer(authedPlayer);
-    setEntryModalOpen(false);
-    setEntryPrompt(undefined);
     setSessionExpiredModal({ open: false, message: '' });
     soundFx.configure(authedPlayer.settings.soundEnabled, authedPlayer.settings.soundVolume);
     await loadProgressionAndBoard();
 
-    if (pendingRoomCode) {
-      const code = pendingRoomCode;
+    const codeToJoin = roomCodeOverride ?? pendingRoomCode;
+    if (codeToJoin) {
       setPendingRoomCode(null);
-      setPendingTargetView(null);
       navigate('multiplayer');
-      window.setTimeout(() => wsClient.joinRoomByCode(code), 300);
+      window.setTimeout(() => wsClient.joinRoomByCode(codeToJoin), 300);
       return;
     }
 
-    const nextView = pendingTargetView || 'lobby';
-    setPendingTargetView(null);
+    const nextView = targetViewOverride || 'lobby';
     navigate(nextView === 'home' ? 'lobby' : nextView);
+  };
+
+  const enterAsAnonymousGuest = async (desiredView: AppView = 'lobby', roomCodeToJoin?: string | null) => {
+    if (enteringGuest) return;
+    setEnteringGuest(true);
+    try {
+      const res = await apiFetch<{
+        ok: boolean;
+        token: string;
+        recoveryKey?: string;
+        player: PlayerProfile;
+      }>('/api/players/guest', { method: 'POST' }, { suppressSessionEvent: true });
+      if (res.recoveryKey) {
+        setStoredRecoveryKey(res.recoveryKey);
+      }
+      soundFx.playWin();
+      await handleAuthenticated(res.player, res.token, desiredView, roomCodeToJoin);
+    } catch (err) {
+      setToastBanner(err instanceof Error ? err.message : 'Could not start guest session.');
+      window.setTimeout(() => setToastBanner(null), 4000);
+    } finally {
+      setEnteringGuest(false);
+    }
   };
 
   const handleProgressUpdated = (
@@ -397,14 +431,12 @@ export function App() {
     navigate('home');
   };
 
-  const handlePlayAction = (desiredView: AppView = 'lobby', customMsg?: string) => {
+  const handlePlayAction = (desiredView: AppView = 'lobby') => {
     if (player) {
       navigate(desiredView);
       return;
     }
-    setPendingTargetView(desiredView);
-    setEntryPrompt(customMsg);
-    setEntryModalOpen(true);
+    void enterAsAnonymousGuest(desiredView);
   };
 
   const handleOpenMultiplayerForGame = (gameId: GameId) => {
@@ -612,17 +644,18 @@ export function App() {
                   className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#0E1324] px-3.5 py-2 text-xs font-semibold text-slate-200 transition hover:border-[#8B5CF6] hover:text-white cursor-pointer"
                 >
                   <LogOut className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">Switch Name</span>
+                  <span className="hidden sm:inline">Exit Session</span>
                 </button>
               </>
             ) : (
               <button
                 type="button"
+                disabled={enteringGuest}
                 onClick={() => handlePlayAction('lobby')}
-                className="inline-flex items-center gap-2 rounded-lg bg-[#8B5CF6] px-4 py-2 text-xs font-bold text-white transition hover:bg-[#7C3AED] shadow-[0_0_20px_rgba(139,92,246,0.35)] cursor-pointer"
+                className="inline-flex items-center gap-2 rounded-lg bg-[#8B5CF6] px-4 py-2 text-xs font-bold text-white transition hover:bg-[#7C3AED] shadow-[0_0_20px_rgba(139,92,246,0.35)] disabled:opacity-60 cursor-pointer"
               >
                 <Play className="h-3.5 w-3.5 fill-current" />
-                PLAY NOW
+                {enteringGuest ? 'ENTERING...' : 'PLAY NOW'}
               </button>
             )}
 
@@ -1318,7 +1351,7 @@ export function App() {
         {activeView === 'tournaments' && (
           <TournamentsSection
             player={player}
-            onRequirePlayer={(msg) => handlePlayAction('tournaments', msg)}
+            onRequirePlayer={() => handlePlayAction('tournaments')}
             onPlayerUpdated={(p) => {
               setPlayer(p);
               void loadProgressionAndBoard();
@@ -1498,27 +1531,16 @@ export function App() {
         </div>
       </footer>
 
-      {/* Username-Only Entry Modal */}
-      {entryModalOpen && (
-        <UsernameEntryModal
-          initialPrompt={entryPrompt}
-          onEntered={(enteredPlayer, token) => void handleAuthenticated(enteredPlayer, token)}
-          onClose={() => {
-            setEntryModalOpen(false);
-            setEntryPrompt(undefined);
-            setPendingTargetView(null);
-            setPendingRoomCode(null);
-          }}
-        />
-      )}
-
       {/* Session Expiration Recovery Modal */}
       {sessionExpiredModal.open && (
         <SessionRecoveryModal
-          defaultUsername={player?.username || ''}
           message={sessionExpiredModal.message}
           onRecovered={(p, token) => void handleAuthenticated(p, token)}
-          onSignOutFully={() => void handleLogout()}
+          onStartFreshGuest={() => {
+            setStoredPlayerToken(null);
+            setSessionExpiredModal({ open: false, message: '' });
+            void enterAsAnonymousGuest('lobby');
+          }}
         />
       )}
     </div>

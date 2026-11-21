@@ -156,7 +156,7 @@ function requirePlayer(req: AuthedPlayerRequest, res: Response, next: NextFuncti
   if (auth.banned) {
     res.status(403).json({
       code: 'PLAYER_BANNED',
-      error: 'This PLAYNOVA username has been suspended by an administrator.',
+      error: 'This PLAYNOVA guest session has been suspended by an administrator.',
     });
     return;
   }
@@ -164,8 +164,8 @@ function requirePlayer(req: AuthedPlayerRequest, res: Response, next: NextFuncti
     res.status(401).json({
       code: auth.expired ? 'SESSION_EXPIRED' : 'UNAUTHENTICATED',
       error: auth.expired
-        ? 'Your session expired. Enter your username to resume playing.'
-        : 'Enter a username to access PLAYNOVA.',
+        ? 'Your guest session expired. Click Play Now to resume.'
+        : 'Click Play Now to start an anonymous guest session.',
     });
     return;
   }
@@ -189,14 +189,6 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
     return;
   }
   next();
-}
-
-function normalizeUsername(raw: unknown): string {
-  return String(raw || '').trim().replace(/\s+/g, ' ');
-}
-
-function isValidUsername(username: string): boolean {
-  return /^[a-zA-Z0-9 _.-]{2,24}$/.test(username);
 }
 
 function escapeHtml(text: string): string {
@@ -399,7 +391,7 @@ async function startServer() {
     if (matchedGame) {
       return {
         title: `${matchedGame.name} — PLAYNOVA`,
-        description: `${matchedGame.description} Enter with just a username on PLAYNOVA.`,
+        description: `${matchedGame.description} Click Play Now to enter instantly as a guest on PLAYNOVA.`,
         imageUrl: `${baseUrl}/share-media/${matchedGame.id}.jpg?v=${version}`,
         imageWidth: 1200,
         imageHeight: 896,
@@ -437,7 +429,7 @@ async function startServer() {
     return {
       title: 'PLAYNOVA — Enter. Compete. Conquer.',
       description:
-        'Challenge intelligent AI opponents, compete in real-time multiplayer rooms, play 12 skill mini-games, and earn virtual rewards with just a username.',
+        'Challenge intelligent AI opponents, compete in real-time multiplayer rooms, play 12 skill mini-games, and earn virtual rewards instantly.',
       imageUrl: `${baseUrl}/og-hero.jpg?v=${version}`,
       imageWidth: 1376,
       imageHeight: 768,
@@ -502,7 +494,7 @@ async function startServer() {
       res.status(403).json({
         authenticated: false,
         code: 'PLAYER_BANNED',
-        error: 'This PLAYNOVA username has been suspended by an administrator.',
+        error: 'This PLAYNOVA guest session has been suspended by an administrator.',
       });
       return;
     }
@@ -511,7 +503,7 @@ async function startServer() {
         res.status(401).json({
           authenticated: false,
           code: 'SESSION_EXPIRED',
-          error: 'Your session expired. Enter your username to continue.',
+          error: 'Your guest session expired. Click Play Now to resume.',
         });
         return;
       }
@@ -527,66 +519,37 @@ async function startServer() {
     });
   });
 
-  app.get('/api/players/check-username', (req, res) => {
-    const username = normalizeUsername(req.query.username);
-    if (!isValidUsername(username)) {
+  function handleAnonymousGuestEntry(req: Request, res: Response) {
+    // Reuse an existing active session if present to prevent duplicate sessions or conflicts
+    const existingAuth = getAuthenticatedPlayer(req);
+    if (existingAuth.player && !existingAuth.banned) {
       res.json({
-        valid: false,
-        available: false,
-        reason: 'Use 2–24 characters (letters, numbers, spaces, dots, hyphens, underscores).',
-      });
-      return;
-    }
-    const existing = db
-      .prepare('SELECT id FROM players WHERE LOWER(username) = LOWER(?)')
-      .get(username) as { id: string } | undefined;
-    res.json({
-      valid: true,
-      available: !existing,
-      reason: existing ? 'That username is already active. Pick a fresh username to jump right in.' : undefined,
-    });
-  });
-
-  app.post('/api/players/enter', rateLimit('player-enter', 30, 60_000), (req, res) => {
-    const username = normalizeUsername(req.body?.username);
-    if (!isValidUsername(username)) {
-      res.status(400).json({
-        error: 'Username must be 2–24 characters (letters, numbers, spaces, dots, hyphens, underscores).',
-      });
-      return;
-    }
-
-    const existing = db
-      .prepare('SELECT id, banned FROM players WHERE LOWER(username) = LOWER(?)')
-      .get(username) as { id: string; banned: number } | undefined;
-    if (existing) {
-      if (existing.banned) {
-        res.status(403).json({
-          error: 'That username is suspended. Please choose a different username.',
-        });
-        return;
-      }
-      res.status(409).json({
-        error: 'That username is already taken. Try adding a number or tag to claim your arena handle.',
+        ok: true,
+        reused: true,
+        token: existingAuth.token,
+        player: sanitizePlayer(existingAuth.player),
       });
       return;
     }
 
     const playerId = crypto.randomUUID();
+    const displayLabel = `Player #${playerId.slice(0, 4).toUpperCase()}`;
     const now = new Date().toISOString();
     const recoveryKey = `PN-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 
     db.prepare(
       `INSERT INTO players
-       (id, email, username, password_hash, email_verified, security_password_hash, security_password_enabled, recovery_key_hash,
+       (id, email, username, password_hash, email_verified, security_password_hash, security_password_enabled,
+        recovery_key_hash, recovery_key_sha,
         xp, level, coins, points, current_streak, best_streak,
         profile_picture_file, active_frame, profile_theme, avatar_config_json, favorite_games_json,
         unlocked_cosmetics_json, settings_json, banned, created_at, updated_at, last_seen_at)
-       VALUES (?, NULL, ?, NULL, 1, NULL, 0, ?, 0, 1, 100, 0, 0, 0, NULL, 'frame_slate', 'theme_midnight_nova', ?, '[]', '["frame_slate","theme_midnight_nova"]', ?, 0, ?, ?, ?)`
+       VALUES (?, NULL, ?, NULL, 1, NULL, 0, ?, ?, 0, 1, 100, 0, 0, 0, NULL, 'frame_slate', 'theme_midnight_nova', ?, '[]', '["frame_slate","theme_midnight_nova"]', ?, 0, ?, ?, ?)`
     ).run(
       playerId,
-      username,
+      displayLabel,
       hashSecret(recoveryKey),
+      sha256(recoveryKey),
       JSON.stringify(DEFAULT_AVATAR_CONFIG),
       JSON.stringify(DEFAULT_PLAYER_SETTINGS),
       now,
@@ -605,7 +568,7 @@ async function startServer() {
     createNotification(
       playerId,
       'Welcome to PLAYNOVA',
-      'You received 100 starter Virtual Coins! Play all 12 games, enter tournaments, and challenge rivals online.',
+      'Instant guest session active with 100 starter Virtual Coins! Play all 12 games, enter tournaments, and challenge rivals online.',
       'system'
     );
 
@@ -617,40 +580,56 @@ async function startServer() {
       recoveryKey,
       player: sanitizePlayer(created),
     });
-  });
+  }
+
+  app.post('/api/players/guest', rateLimit('player-enter', 40, 60_000), handleAnonymousGuestEntry);
+  app.post('/api/players/enter', rateLimit('player-enter', 40, 60_000), handleAnonymousGuestEntry);
 
   app.post('/api/players/recover', rateLimit('player-recover', 15, 60_000), (req, res) => {
-    const username = normalizeUsername(req.body?.username);
     const recoveryKey = String(req.body?.recoveryKey || '').trim().toUpperCase();
-    if (!username || !recoveryKey) {
-      res.status(400).json({ error: 'Enter both your username and your Progress Save Key.' });
+    if (!recoveryKey) {
+      res.status(400).json({ error: 'Enter your Progress Save Key to restore your guest session.' });
       return;
     }
 
-    const player = db
-      .prepare('SELECT * FROM players WHERE LOWER(username) = LOWER(?)')
-      .get(username) as DbPlayer | undefined;
+    const keySha = sha256(recoveryKey);
+    let player = db
+      .prepare('SELECT * FROM players WHERE recovery_key_sha = ? LIMIT 1')
+      .get(keySha) as DbPlayer | undefined;
+
+    if (!player) {
+      // Fallback check for legacy guest rows created before recovery_key_sha index
+      const candidates = db
+        .prepare('SELECT * FROM players WHERE recovery_key_hash IS NOT NULL ORDER BY last_seen_at DESC LIMIT 200')
+        .all() as DbPlayer[];
+      player = candidates.find((p) => p.recovery_key_hash && verifySecret(recoveryKey, p.recovery_key_hash));
+    }
 
     if (player?.banned) {
-      res.status(403).json({ error: 'This PLAYNOVA username has been suspended by an administrator.' });
+      res.status(403).json({ error: 'This PLAYNOVA guest session has been suspended by an administrator.' });
       return;
     }
 
-    if (!player || !player.recovery_key_hash || !verifySecret(recoveryKey, player.recovery_key_hash)) {
-      res.status(401).json({ error: 'Username or Progress Save Key did not match any saved profile.' });
+    if (!player) {
+      res.status(401).json({ error: 'Progress Save Key did not match any saved guest session.' });
       return;
     }
 
     const token = createPlayerSession(req, res, player.id);
-    db.prepare('UPDATE players SET last_seen_at = ? WHERE id = ?').run(new Date().toISOString(), player.id);
+    db.prepare('UPDATE players SET recovery_key_sha = COALESCE(recovery_key_sha, ?), last_seen_at = ? WHERE id = ?').run(
+      keySha,
+      new Date().toISOString(),
+      player.id
+    );
     const updated = db.prepare('SELECT * FROM players WHERE id = ?').get(player.id) as DbPlayer;
     res.json({ ok: true, token, player: sanitizePlayer(updated) });
   });
 
   app.post('/api/profile/recovery-key', requirePlayer, (req: AuthedPlayerRequest, res) => {
     const recoveryKey = `PN-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-    db.prepare('UPDATE players SET recovery_key_hash = ?, updated_at = ? WHERE id = ?').run(
+    db.prepare('UPDATE players SET recovery_key_hash = ?, recovery_key_sha = ?, updated_at = ? WHERE id = ?').run(
       hashSecret(recoveryKey),
+      sha256(recoveryKey),
       new Date().toISOString(),
       req.player!.id
     );
@@ -674,28 +653,6 @@ async function startServer() {
   // =========================================================================
   // 02. PROFILE, PROFILE PICTURE UPLOAD & ACCOUNT SETTINGS
   // =========================================================================
-
-  app.patch('/api/profile/username', requirePlayer, (req: AuthedPlayerRequest, res) => {
-    const username = normalizeUsername(req.body?.username);
-    if (!isValidUsername(username)) {
-      res.status(400).json({ error: 'Username must be 2–24 valid characters.' });
-      return;
-    }
-    const conflict = db
-      .prepare('SELECT id FROM players WHERE LOWER(username) = LOWER(?) AND id != ?')
-      .get(username, req.player!.id) as { id: string } | undefined;
-    if (conflict) {
-      res.status(409).json({ error: 'That display name is already claimed by another player.' });
-      return;
-    }
-    db.prepare('UPDATE players SET username = ?, updated_at = ? WHERE id = ?').run(
-      username,
-      new Date().toISOString(),
-      req.player!.id
-    );
-    const updated = db.prepare('SELECT * FROM players WHERE id = ?').get(req.player!.id) as DbPlayer;
-    res.json({ ok: true, player: sanitizePlayer(updated) });
-  });
 
   app.post('/api/profile/picture', requirePlayer, (req: AuthedPlayerRequest, res) => {
     const player = req.player!;
@@ -1625,7 +1582,7 @@ async function startServer() {
   app.get('/api/leaderboard', (req, res) => {
     const auth = getAuthenticatedPlayer(req);
     if (auth.expired) {
-      res.status(401).json({ code: 'SESSION_EXPIRED', error: 'Your session expired. Enter your username to continue.' });
+      res.status(401).json({ code: 'SESSION_EXPIRED', error: 'Your guest session expired. Click Play Now to resume.' });
       return;
     }
     const currentPlayerId = auth.player?.id || null;
@@ -2016,7 +1973,7 @@ async function startServer() {
     if (auth.expired) {
       res.status(401).json({
         code: 'SESSION_EXPIRED',
-        error: 'Your session expired. Re-enter with your username to continue.',
+        error: 'Your guest session expired. Click Play Now to resume.',
       });
       return;
     }

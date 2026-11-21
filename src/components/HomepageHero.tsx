@@ -101,7 +101,7 @@ export function HomepageHero({
             </h1>
 
             <p className="max-w-xl text-base leading-relaxed text-slate-300">
-              Twelve skill-based strategy, puzzle, and arcade arenas ready to play in seconds. Enter with just a username—no email or password required—to battle adaptive AI, chat in real-time multiplayer rooms, win Virtual Coins, and climb global leaderboards.
+              Twelve skill-based strategy, puzzle, and arcade arenas ready to play in seconds. Click Play Now for instant guest access—no username, email, or registration required—to battle adaptive AI, chat in real-time multiplayer rooms, win Virtual Coins, and climb global leaderboards.
             </p>
 
             <div className="flex flex-wrap items-center gap-4 pt-1">
@@ -169,7 +169,7 @@ export function HomepageHero({
             </h2>
           </div>
           <p className="text-xs text-slate-400">
-            Select any game card to enter with a username and play immediately.
+            Select any game card to launch an instant guest session and play immediately.
           </p>
         </div>
 

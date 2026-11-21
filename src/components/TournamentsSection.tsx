@@ -67,7 +67,7 @@ export function TournamentsSection({
 
   const handleRegister = async (tId: string) => {
     if (!player) {
-      onRequirePlayer('Enter your PLAYNOVA username to register for a tournament.');
+      onRequirePlayer();
       return;
     }
     setBusyId(tId);
@@ -92,7 +92,7 @@ export function TournamentsSection({
 
   const handleLaunchExhibition = async (gameId: GameId) => {
     if (!player) {
-      onRequirePlayer('Enter a username to start a 4-seed Practice Exhibition Cup.');
+      onRequirePlayer();
       return;
     }
     setBusyId('launch_exh');
@@ -119,7 +119,7 @@ export function TournamentsSection({
   const handleCreateTournament = async (e: FormEvent) => {
     e.preventDefault();
     if (!player) {
-      onRequirePlayer('Enter a username to host a community tournament.');
+      onRequirePlayer();
       return;
     }
     setBusyId('create');
@@ -217,7 +217,7 @@ export function TournamentsSection({
             type="button"
             onClick={() => {
               if (!player) {
-                onRequirePlayer('Enter a username to organize a scheduled tournament.');
+                onRequirePlayer();
                 return;
               }
               setShowCreate((v) => !v);

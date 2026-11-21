@@ -4,7 +4,6 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { createServer as createViteServer } from 'vite';
 import {
   ALL_GAME_IDS,
   DEFAULT_AVATAR_CONFIG,
@@ -84,24 +83,36 @@ function extractToken(req: Request, cookieName: string, headerName = 'authorizat
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-function setHttpCookie(res: Response, name: string, token: string, maxAgeMs: number) {
-  const isProd = process.env.NODE_ENV === 'production' || Boolean(process.env.APP_URL?.startsWith('https://'));
+function isHttpsRequest(req: Request): boolean {
+  const xfProto = String(req.get('x-forwarded-proto') || '').toLowerCase();
+  const origin = String(req.get('origin') || '').toLowerCase();
+  return (
+    req.secure ||
+    xfProto.includes('https') ||
+    origin.startsWith('https://') ||
+    process.env.NODE_ENV === 'production' ||
+    Boolean(process.env.APP_URL?.startsWith('https://'))
+  );
+}
+
+function setHttpCookie(req: Request, res: Response, name: string, token: string, maxAgeMs: number) {
+  const isHttps = isHttpsRequest(req);
   res.cookie(name, token, {
     httpOnly: true,
-    sameSite: isProd ? 'none' : 'lax',
-    secure: isProd,
+    sameSite: isHttps ? 'none' : 'lax',
+    secure: isHttps,
     maxAge: maxAgeMs,
     path: '/',
   });
 }
 
-function createPlayerSession(res: Response, playerId: string): string {
+function createPlayerSession(req: Request, res: Response, playerId: string): string {
   const rawToken = crypto.randomBytes(32).toString('hex');
   const now = Date.now();
   db.prepare(
     'INSERT INTO player_sessions (id, player_id, token_hash, expires_at, created_at, last_active_at) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(crypto.randomUUID(), playerId, sha256(rawToken), now + SESSION_DURATION_MS, now, now);
-  setHttpCookie(res, 'gv_session', rawToken, SESSION_DURATION_MS);
+  setHttpCookie(req, res, 'gv_session', rawToken, SESSION_DURATION_MS);
   return rawToken;
 }
 
@@ -217,6 +228,20 @@ async function startServer() {
 
   const httpServer = http.createServer(app);
   const realtime = attachRealtimeServer(httpServer);
+
+  app.get('/api/health', (_req, res) => {
+    try {
+      db.prepare('SELECT 1').get();
+      res.json({
+        ok: true,
+        status: 'healthy',
+        db: 'connected',
+        uptimeSec: Math.round((Date.now() - SERVER_STARTED_AT) / 1000),
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, status: 'unhealthy', error: String(err) });
+    }
+  });
 
   // Clean SVG brand emblem favicon
   app.get('/favicon.svg', (_req, res) => {
@@ -584,7 +609,7 @@ async function startServer() {
       'system'
     );
 
-    const token = createPlayerSession(res, playerId);
+    const token = createPlayerSession(req, res, playerId);
     const created = db.prepare('SELECT * FROM players WHERE id = ?').get(playerId) as DbPlayer;
     res.status(201).json({
       ok: true,
@@ -616,7 +641,7 @@ async function startServer() {
       return;
     }
 
-    const token = createPlayerSession(res, player.id);
+    const token = createPlayerSession(req, res, player.id);
     db.prepare('UPDATE players SET last_seen_at = ? WHERE id = ?').run(new Date().toISOString(), player.id);
     const updated = db.prepare('SELECT * FROM players WHERE id = ?').get(player.id) as DbPlayer;
     res.json({ ok: true, token, player: sanitizePlayer(updated) });
@@ -633,14 +658,18 @@ async function startServer() {
     res.json({ ok: true, recoveryKey, player: sanitizePlayer(updated) });
   });
 
-  app.post('/api/auth/logout', (req, res) => {
+  function handlePlayerLogout(req: Request, res: Response) {
     const token = extractToken(req, 'gv_session', 'authorization');
     if (token) {
       db.prepare('DELETE FROM player_sessions WHERE token_hash = ?').run(sha256(token));
     }
-    res.clearCookie('gv_session', { path: '/' });
+    const isHttps = isHttpsRequest(req);
+    res.clearCookie('gv_session', { path: '/', sameSite: isHttps ? 'none' : 'lax', secure: isHttps });
     res.json({ ok: true });
-  });
+  }
+
+  app.post('/api/auth/logout', handlePlayerLogout);
+  app.post('/api/players/logout', handlePlayerLogout);
 
   // =========================================================================
   // 02. PROFILE, PROFILE PICTURE UPLOAD & ACCOUNT SETTINGS
@@ -2329,7 +2358,7 @@ async function startServer() {
       Date.now() + ADMIN_SESSION_DURATION_MS,
       Date.now()
     );
-    setHttpCookie(res, 'gv_admin_session', rawToken, ADMIN_SESSION_DURATION_MS);
+    setHttpCookie(req, res, 'gv_admin_session', rawToken, ADMIN_SESSION_DURATION_MS);
     res.status(201).json({ ok: true, adminToken: rawToken });
   });
 
@@ -2366,7 +2395,7 @@ async function startServer() {
       Date.now() + ADMIN_SESSION_DURATION_MS,
       Date.now()
     );
-    setHttpCookie(res, 'gv_admin_session', rawToken, ADMIN_SESSION_DURATION_MS);
+    setHttpCookie(req, res, 'gv_admin_session', rawToken, ADMIN_SESSION_DURATION_MS);
     res.json({ ok: true, adminToken: rawToken });
   });
 
@@ -2723,11 +2752,22 @@ async function startServer() {
     }
   });
 
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
+
   // =========================================================================
   // 07. VITE / STATIC SERVING WITH SERVER-RENDERED OPEN GRAPH & TWITTER META
   // =========================================================================
 
-  if (process.env.NODE_ENV !== 'production') {
+  const distDir = path.resolve(process.cwd(), 'dist');
+  const distHtmlPath = path.join(distDir, 'index.html');
+  const useProdStatic =
+    process.env.NODE_ENV === 'production' ||
+    (process.env.npm_lifecycle_event === 'start' && fs.existsSync(distHtmlPath));
+
+  if (!useProdStatic) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true, hmr: false },
       appType: 'spa',
@@ -2768,8 +2808,6 @@ async function startServer() {
 
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(process.cwd(), 'dist');
-    const distHtmlPath = path.join(distDir, 'index.html');
     app.use(
       express.static(distDir, {
         index: false,
@@ -2782,7 +2820,11 @@ async function startServer() {
         },
       })
     );
-    app.get('/{*splat}', (req, res) => {
+    app.get('*', (req, res) => {
+      if (req.path.startsWith('/api/')) {
+        res.status(404).json({ error: `API route not found: ${req.path}` });
+        return;
+      }
       const template = fs.readFileSync(distHtmlPath, 'utf-8');
       const htmlWithMeta = injectSocialMetaTags(template, req);
       const hasBust = Boolean(req.query.v || req.query.refresh);
@@ -2796,7 +2838,7 @@ async function startServer() {
     });
   }
 
-  const port = 3000;
+  const port = Number(process.env.PORT) || 3000;
   httpServer.listen(port, '0.0.0.0', () => {
     console.log(`PLAYNOVA server running on http://0.0.0.0:${port}`);
   });

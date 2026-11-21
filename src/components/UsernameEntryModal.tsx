@@ -73,7 +73,13 @@ export function UsernameEntryModal({ onEntered, onClose, initialPrompt }: Userna
         }
       } catch {
         if (!cancelled) {
-          setAvailability({ checking: false, valid: false, available: false, hasDeviceKey: false });
+          setAvailability({
+            checking: false,
+            valid: true,
+            available: true,
+            hasDeviceKey: false,
+            reason: 'Ready to validate on submit.',
+          });
         }
       }
     }, 180);

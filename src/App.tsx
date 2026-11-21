@@ -52,82 +52,44 @@ import type {
   GameId,
   LeaderboardEntry,
   MatchRecord,
+  MultiplayerGameId,
   NotificationItem,
   PlatformAnnouncement,
   PlayerProfile,
   TournamentItem,
 } from './types.ts';
-import { apiFetch, getStoredPlayerToken, setStoredPlayerToken, setStoredRecoveryKey } from './utils/api.ts';
+import { MULTIPLAYER_GAME_IDS } from './game/catalog.ts';
+import { apiFetch, getStoredPlayerToken, setStoredPlayerToken } from './utils/api.ts';
+import {
+  ensureAnonymousGuestSession,
+  parseLocationToRoute,
+  resolveGameIdFromSlug,
+  viewToPath,
+} from './utils/gameLauncher.ts';
 import { soundFx } from './utils/sound.ts';
 import { wsClient, type RealtimeSnapshot } from './utils/wsClient.ts';
 
-function parseInitialView(): AppView {
-  if (typeof window === 'undefined') return 'home';
-  const p = window.location.pathname.toLowerCase();
-  if (p.startsWith('/lobby')) return 'lobby';
-  if (p.startsWith('/multiplayer')) return 'multiplayer';
-  if (p.startsWith('/tournaments')) return 'tournaments';
-  if (p.startsWith('/games/tictactoe')) return 'tictactoe';
-  if (p.startsWith('/games/rps')) return 'rps';
-  if (p.startsWith('/games/guess')) return 'guess_number';
-  if (p.startsWith('/games/connect_four') || p.startsWith('/games/connect-four')) return 'connect_four';
-  if (p.startsWith('/games/chess')) return 'chess';
-  if (p.startsWith('/games/memory')) return 'memory_match';
-  if (p.startsWith('/games/word')) return 'word_battle';
-  if (p.startsWith('/games/trivia')) return 'trivia_challenge';
-  if (p.startsWith('/games/sudoku')) return 'sudoku';
-  if (p.startsWith('/games/quick_math') || p.startsWith('/games/quick-math')) return 'quick_math';
-  if (p.startsWith('/games/reaction')) return 'reaction_test';
-  if (p.startsWith('/games/pattern')) return 'pattern_recognition';
-  if (p.startsWith('/games')) return 'games';
-  if (p.startsWith('/leaderboard')) return 'leaderboard';
-  if (p.startsWith('/link-preview')) return 'link_preview';
-  if (p.startsWith('/profile')) return 'profile';
-  if (p.startsWith('/admin')) return 'admin';
-  return 'home';
-}
-
-function parseInitialRoomCode(): string | null {
-  if (typeof window === 'undefined') return null;
-  const code = new URLSearchParams(window.location.search).get('room');
-  return code ? code.trim().toUpperCase() : null;
-}
-
-function viewToPath(view: AppView): string {
-  switch (view) {
-    case 'lobby':
-      return '/lobby';
-    case 'multiplayer':
-      return '/multiplayer';
-    case 'tournaments':
-      return '/tournaments';
-    case 'games':
-      return '/games';
-    case 'leaderboard':
-      return '/leaderboard';
-    case 'link_preview':
-      return '/link-preview';
-    case 'profile':
-      return '/profile';
-    case 'admin':
-      return '/admin';
-    case 'home':
-      return '/';
-    default:
-      return `/games/${view}`;
-  }
-}
-
 export function App() {
+  const initialRoute = parseLocationToRoute();
   const [booting, setBooting] = useState(true);
   const [player, setPlayer] = useState<PlayerProfile | null>(null);
-  const [view, setView] = useState<AppView>(parseInitialView);
-  const [multiplayerGame, setMultiplayerGame] = useState<GameId>('tictactoe');
+  const [view, setView] = useState<AppView>(initialRoute.view);
+  const [invalidRoutePath, setInvalidRoutePath] = useState<string | null>(
+    initialRoute.matched ? null : initialRoute.invalidPath
+  );
+  const [multiplayerGame, setMultiplayerGame] = useState<GameId>(
+    initialRoute.multiplayerGame || 'tictactoe'
+  );
   const [selectedCategory, setSelectedCategory] = useState<'All' | GameCategory>('All');
   const [rt, setRt] = useState<RealtimeSnapshot>(wsClient.getSnapshot());
 
   const [enteringGuest, setEnteringGuest] = useState(false);
-  const [pendingRoomCode, setPendingRoomCode] = useState<string | null>(parseInitialRoomCode);
+  const [pendingRoomCode, setPendingRoomCode] = useState<string | null>(initialRoute.roomCode);
+  const [launchError, setLaunchError] = useState<{
+    message: string;
+    retryView: AppView;
+    retryMultiplayerGame?: GameId;
+  } | null>(null);
 
   const [publicStats, setPublicStats] = useState({
     onlinePlayers: 0,
@@ -158,13 +120,16 @@ export function App() {
   const playerRef = useRef<PlayerProfile | null>(null);
   playerRef.current = player;
 
-  const navigate = useCallback((nextView: AppView) => {
+  const navigate = useCallback((nextView: AppView, mpGameOverride?: MultiplayerGameId) => {
     setView(nextView);
+    setInvalidRoutePath(null);
+    setLaunchError(null);
     setMobileNavOpen(false);
     setNotifOpen(false);
     if (typeof window !== 'undefined') {
-      const targetPath = viewToPath(nextView);
-      if (window.location.pathname !== targetPath || window.location.search) {
+      const targetPath = viewToPath(nextView, nextView === 'multiplayer' ? mpGameOverride : undefined);
+      const currentFull = `${window.location.pathname}${window.location.search}`;
+      if (currentFull !== targetPath) {
         window.history.pushState({ view: nextView }, '', targetPath);
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -279,23 +244,24 @@ export function App() {
           if (pendingRoomCode) {
             const codeToJoin = pendingRoomCode;
             setPendingRoomCode(null);
-            navigate('multiplayer');
+            navigate('multiplayer', initialRoute.multiplayerGame || undefined);
             window.setTimeout(() => wsClient.joinRoomByCode(codeToJoin), 250);
           }
         } else {
-          const currentInitialView = parseInitialView();
+          const parsed = parseLocationToRoute();
           const needsGuest =
-            Boolean(pendingRoomCode) ||
-            currentInitialView === 'lobby' ||
-            currentInitialView === 'games' ||
-            currentInitialView === 'multiplayer' ||
-            currentInitialView === 'profile' ||
-            ALL_GAME_IDS.includes(currentInitialView as GameId);
+            parsed.matched &&
+            (Boolean(pendingRoomCode) ||
+              parsed.view === 'lobby' ||
+              parsed.view === 'multiplayer' ||
+              parsed.view === 'profile' ||
+              ALL_GAME_IDS.includes(parsed.view as GameId));
 
           if (needsGuest) {
             await enterAsAnonymousGuest(
-              pendingRoomCode ? 'multiplayer' : currentInitialView,
-              pendingRoomCode
+              pendingRoomCode ? 'multiplayer' : parsed.view,
+              pendingRoomCode,
+              parsed.multiplayerGame || undefined
             );
           }
         }
@@ -318,7 +284,12 @@ export function App() {
   // Browser back/forward navigation
   useEffect(() => {
     function onPopState() {
-      setView(parseInitialView());
+      const parsed = parseLocationToRoute();
+      setView(parsed.view);
+      setInvalidRoutePath(parsed.matched ? null : parsed.invalidPath);
+      if (parsed.multiplayerGame) {
+        setMultiplayerGame(parsed.multiplayerGame);
+      }
     }
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -347,7 +318,8 @@ export function App() {
     authedPlayer: PlayerProfile,
     token?: string,
     targetViewOverride?: AppView,
-    roomCodeOverride?: string | null
+    roomCodeOverride?: string | null,
+    mpGameOverride?: MultiplayerGameId
   ) => {
     const activeToken = token || getStoredPlayerToken();
     if (activeToken) {
@@ -355,6 +327,7 @@ export function App() {
       wsClient.connect(activeToken);
     }
     setPlayer(authedPlayer);
+    setLaunchError(null);
     setSessionExpiredModal({ open: false, message: '' });
     soundFx.configure(authedPlayer.settings.soundEnabled, authedPlayer.settings.soundVolume);
     await loadProgressionAndBoard();
@@ -362,33 +335,34 @@ export function App() {
     const codeToJoin = roomCodeOverride ?? pendingRoomCode;
     if (codeToJoin) {
       setPendingRoomCode(null);
-      navigate('multiplayer');
+      navigate('multiplayer', mpGameOverride);
       window.setTimeout(() => wsClient.joinRoomByCode(codeToJoin), 300);
       return;
     }
 
     const nextView = targetViewOverride || 'lobby';
-    navigate(nextView === 'home' ? 'lobby' : nextView);
+    navigate(nextView === 'home' ? 'lobby' : nextView, mpGameOverride);
   };
 
-  const enterAsAnonymousGuest = async (desiredView: AppView = 'lobby', roomCodeToJoin?: string | null) => {
-    if (enteringGuest) return;
+  const enterAsAnonymousGuest = async (
+    desiredView: AppView = 'lobby',
+    roomCodeToJoin?: string | null,
+    mpGameOverride?: MultiplayerGameId
+  ) => {
     setEnteringGuest(true);
+    setLaunchError(null);
     try {
-      const res = await apiFetch<{
-        ok: boolean;
-        token: string;
-        recoveryKey?: string;
-        player: PlayerProfile;
-      }>('/api/players/guest', { method: 'POST' }, { suppressSessionEvent: true });
-      if (res.recoveryKey) {
-        setStoredRecoveryKey(res.recoveryKey);
-      }
+      const { player: guestPlayer, token } = await ensureAnonymousGuestSession();
       soundFx.playWin();
-      await handleAuthenticated(res.player, res.token, desiredView, roomCodeToJoin);
+      await handleAuthenticated(guestPlayer, token, desiredView, roomCodeToJoin, mpGameOverride);
     } catch (err) {
-      setToastBanner(err instanceof Error ? err.message : 'Could not start guest session.');
-      window.setTimeout(() => setToastBanner(null), 4000);
+      const message = err instanceof Error ? err.message : 'Could not initialize PLAYNOVA guest session.';
+      setLaunchError({
+        message,
+        retryView: desiredView,
+        retryMultiplayerGame: mpGameOverride,
+      });
+      setToastBanner(message);
     } finally {
       setEnteringGuest(false);
     }
@@ -432,16 +406,33 @@ export function App() {
   };
 
   const handlePlayAction = (desiredView: AppView = 'lobby') => {
+    const resolvedTarget: AppView =
+      typeof desiredView === 'string' && desiredView !== 'home' && desiredView !== 'lobby' &&
+      desiredView !== 'games' && desiredView !== 'multiplayer' && desiredView !== 'tournaments' &&
+      desiredView !== 'leaderboard' && desiredView !== 'link_preview' && desiredView !== 'profile' &&
+      desiredView !== 'admin'
+        ? resolveGameIdFromSlug(desiredView) || 'lobby'
+        : desiredView;
+
+    soundFx.playSelect();
     if (player) {
-      navigate(desiredView);
+      navigate(resolvedTarget);
       return;
     }
-    void enterAsAnonymousGuest(desiredView);
+    void enterAsAnonymousGuest(resolvedTarget);
   };
 
-  const handleOpenMultiplayerForGame = (gameId: GameId) => {
-    setMultiplayerGame(gameId);
-    handlePlayAction('multiplayer');
+  const handleOpenMultiplayerForGame = (gameId?: GameId) => {
+    const mpTarget: MultiplayerGameId =
+      gameId && MULTIPLAYER_GAME_IDS.includes(gameId as MultiplayerGameId)
+        ? (gameId as MultiplayerGameId)
+        : 'tictactoe';
+    setMultiplayerGame(mpTarget);
+    if (player) {
+      navigate('multiplayer', mpTarget);
+      return;
+    }
+    void enterAsAnonymousGuest('multiplayer', undefined, mpTarget);
   };
 
   const handleMarkNotificationsRead = async () => {
@@ -485,6 +476,7 @@ export function App() {
 
   const isPublicView =
     view === 'home' ||
+    view === 'games' ||
     view === 'tournaments' ||
     view === 'leaderboard' ||
     view === 'link_preview' ||
@@ -773,8 +765,77 @@ export function App() {
         </div>
       )}
 
+      {/* Launch Error Banner with Retry */}
+      {launchError && (
+        <div className="mx-auto mt-4 w-full max-w-7xl px-4 sm:px-6">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/45 px-4 py-3 text-sm text-rose-100">
+            <div className="min-w-0 flex-1">
+              <p className="font-semibold text-white">Unable to launch PLAYNOVA Arena</p>
+              <p className="mt-0.5 text-xs text-rose-200">{launchError.message}</p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                disabled={enteringGuest}
+                onClick={() => {
+                  if (launchError.retryView === 'multiplayer') {
+                    handleOpenMultiplayerForGame(launchError.retryMultiplayerGame);
+                  } else {
+                    handlePlayAction(launchError.retryView);
+                  }
+                }}
+                className="rounded-lg bg-rose-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-rose-500 disabled:opacity-60 cursor-pointer"
+              >
+                {enteringGuest ? 'Retrying...' : 'Retry Launch'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setLaunchError(null)}
+                className="rounded-lg border border-white/[0.15] px-3 py-1.5 text-xs text-rose-200 hover:text-white cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Workspace */}
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6">
+        {invalidRoutePath && (
+          <div className="mb-8 rounded-2xl border border-[#F97316]/35 bg-[#0E1324] p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="font-mono text-xs uppercase tracking-[0.2em] text-[#F97316]">
+                  Route Not Recognized · {invalidRoutePath}
+                </p>
+                <h2 className="mt-1 font-display text-2xl font-bold text-white">
+                  Choose a Valid PLAYNOVA Arena Below
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate(player ? 'lobby' : 'home')}
+                className="rounded-lg bg-[#8B5CF6] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
+              >
+                {player ? 'Back to Lobby' : 'Back to Homepage'}
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {GAME_CATALOG.map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  onClick={() => handlePlayAction(g.id)}
+                  className="rounded-lg border border-white/[0.1] bg-[#090D1A] px-3 py-1.5 text-xs font-semibold text-slate-200 hover:border-[#8B5CF6] hover:text-white cursor-pointer"
+                >
+                  Play {g.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {activeView === 'home' && (
           <HomepageHero
             publicStats={{
@@ -786,6 +847,7 @@ export function App() {
             topLeaders={topLeaders}
             tournaments={tournaments}
             onPlayNow={(desired) => handlePlayAction(desired || 'lobby')}
+            onOpenMultiplayer={(gameId) => handleOpenMultiplayerForGame(gameId)}
             onNavigatePublic={(publicView) => navigate(publicView)}
           />
         )}
@@ -845,14 +907,14 @@ export function App() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => navigate('chess')}
+                      onClick={() => handlePlayAction('chess')}
                       className="inline-flex items-center gap-2 rounded-lg border border-white/[0.15] bg-[#0E1324]/90 px-4 py-2.5 text-sm font-semibold text-white transition hover:border-[#38BDF8] cursor-pointer"
                     >
                       Chess
                     </button>
                     <button
                       type="button"
-                      onClick={() => navigate('connect_four')}
+                      onClick={() => handlePlayAction('connect_four')}
                       className="inline-flex items-center gap-2 rounded-lg border border-white/[0.15] bg-[#0E1324]/90 px-4 py-2.5 text-sm font-semibold text-white transition hover:border-[#38BDF8] cursor-pointer"
                     >
                       Connect Four
@@ -932,10 +994,7 @@ export function App() {
                       <button
                         key={fid}
                         type="button"
-                        onClick={() => {
-                          soundFx.playSelect();
-                          navigate(fid);
-                        }}
+                        onClick={() => handlePlayAction(fid)}
                         className="inline-flex items-center gap-2 rounded-xl border border-[#F97316]/35 bg-[#0E1324] px-4 py-2 text-xs font-semibold text-white hover:border-[#F97316] cursor-pointer"
                       >
                         <Play className="h-3.5 w-3.5 text-[#F97316] fill-current" />
@@ -1029,10 +1088,7 @@ export function App() {
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              onClick={() => {
-                                soundFx.playSelect();
-                                navigate(game.id);
-                              }}
+                              onClick={() => handlePlayAction(game.id)}
                               className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#8B5CF6] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[#7C3AED] cursor-pointer"
                             >
                               <Gamepad2 className="h-4 w-4" />
@@ -1243,7 +1299,7 @@ export function App() {
           </div>
         )}
 
-        {activeView === 'games' && player && (
+        {activeView === 'games' && (
           <div className="space-y-8">
             <div className="border-b border-white/[0.08] pb-6 space-y-4">
               <div>
@@ -1275,7 +1331,7 @@ export function App() {
 
             <div className="space-y-6">
               {filteredCatalog.map((game) => {
-                const st = player.stats.byGame[game.id] || { played: 0, wins: 0, bestScore: 0 };
+                const st = player?.stats.byGame[game.id] || { played: 0, wins: 0, bestScore: 0 };
                 return (
                   <div
                     key={game.id}
@@ -1313,11 +1369,11 @@ export function App() {
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="button"
-                            onClick={() => navigate(game.id)}
+                            onClick={() => handlePlayAction(game.id)}
                             className="inline-flex items-center gap-2 rounded-lg bg-[#8B5CF6] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
                           >
                             <Play className="h-3.5 w-3.5 fill-current" />
-                            Play Solo / Local
+                            Play Now
                           </button>
                           {game.supportsMultiplayer && (
                             <button

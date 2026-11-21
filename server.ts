@@ -244,6 +244,10 @@ async function startServer() {
     );
   });
 
+  app.get('/favicon.ico', (_req, res) => {
+    res.redirect(302, '/favicon.svg');
+  });
+
   // Crawler-friendly robots.txt (explicitly allow all social link-preview bots)
   app.get('/robots.txt', (_req, res) => {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -387,7 +391,18 @@ async function startServer() {
     const version = versionFromQuery || String(getPreviewCacheVersion());
     const canonicalPath = reqPath === '/' ? '/' : reqPath;
 
-    const matchedGame = GAME_CATALOG.find((g) => cleanPath.includes(`/games/${g.id}`) || cleanPath.endsWith(`/${g.id}`));
+    const normalizedCleanPath = cleanPath.replace(/-/g, '_');
+    const matchedGame = GAME_CATALOG.find(
+      (g) =>
+        normalizedCleanPath.includes(`/games/${g.id}`) ||
+        normalizedCleanPath.endsWith(`/${g.id}`) ||
+        (g.id === 'guess_number' && normalizedCleanPath.endsWith('/guess')) ||
+        (g.id === 'memory_match' && normalizedCleanPath.endsWith('/memory')) ||
+        (g.id === 'word_battle' && normalizedCleanPath.endsWith('/word')) ||
+        (g.id === 'trivia_challenge' && normalizedCleanPath.endsWith('/trivia')) ||
+        (g.id === 'reaction_test' && normalizedCleanPath.endsWith('/reaction')) ||
+        (g.id === 'pattern_recognition' && normalizedCleanPath.endsWith('/pattern'))
+    );
     if (matchedGame) {
       return {
         title: `${matchedGame.name} — PLAYNOVA`,
@@ -2719,8 +2734,13 @@ async function startServer() {
 
   const distDir = path.resolve(process.cwd(), 'dist');
   const distHtmlPath = path.join(distDir, 'index.html');
+  const isDevMode =
+    process.env.NODE_ENV === 'development' ||
+    process.argv.includes('--dev') ||
+    process.execArgv.some((arg) => arg.includes('tsx'));
   const useProdStatic =
     process.env.NODE_ENV === 'production' ||
+    (!isDevMode && fs.existsSync(distHtmlPath)) ||
     (process.env.npm_lifecycle_event === 'start' && fs.existsSync(distHtmlPath));
 
   if (!useProdStatic) {
@@ -2730,21 +2750,7 @@ async function startServer() {
       appType: 'spa',
     });
 
-    app.get(
-      [
-        '/',
-        '/lobby',
-        '/multiplayer',
-        '/tournaments',
-        '/games',
-        '/games/:game',
-        '/leaderboard',
-        '/link-preview',
-        '/profile',
-        '/admin',
-        '/share/:slug',
-      ],
-      async (req, res, next) => {
+    const serveDevSpaWithMeta = async (req: Request, res: Response, next: NextFunction) => {
       try {
         const templatePath = path.resolve(process.cwd(), 'index.html');
         const template = fs.readFileSync(templatePath, 'utf-8');
@@ -2761,9 +2767,41 @@ async function startServer() {
       } catch (err) {
         next(err);
       }
-    });
+    };
+
+    app.get(
+      [
+        '/',
+        '/lobby',
+        '/multiplayer',
+        '/tournaments',
+        '/games',
+        '/games/:game',
+        '/leaderboard',
+        '/link-preview',
+        '/profile',
+        '/admin',
+        '/share/:slug',
+      ],
+      serveDevSpaWithMeta
+    );
 
     app.use(vite.middlewares);
+
+    app.get('*', (req, res, next) => {
+      if (
+        req.path.startsWith('/api/') ||
+        req.path.startsWith('/ws') ||
+        req.path.startsWith('/src/') ||
+        req.path.startsWith('/@') ||
+        req.path.startsWith('/node_modules/') ||
+        /\.[a-z0-9]{1,8}$/i.test(req.path)
+      ) {
+        next();
+        return;
+      }
+      void serveDevSpaWithMeta(req, res, next);
+    });
   } else {
     app.use(
       express.static(distDir, {
@@ -2795,9 +2833,23 @@ async function startServer() {
     });
   }
 
-  const port = Number(process.env.PORT) || 3000;
+  function resolveListenPort(): number {
+    const portFlagIdx = process.argv.findIndex((a) => a === '--port' || a.startsWith('--port='));
+    if (portFlagIdx !== -1) {
+      const arg = process.argv[portFlagIdx];
+      const raw = arg.includes('=') ? arg.split('=')[1] : process.argv[portFlagIdx + 1];
+      const parsed = Number(raw);
+      if (Number.isInteger(parsed) && parsed > 0) return parsed;
+    }
+    if (process.env.NGINX_PORT && process.env.PORT === process.env.NGINX_PORT) {
+      return Number(process.env.DEFAULT_APP_PORT) || 3000;
+    }
+    return Number(process.env.PORT) || Number(process.env.DEFAULT_APP_PORT) || 3000;
+  }
+
+  const port = resolveListenPort();
   httpServer.listen(port, '0.0.0.0', () => {
-    console.log(`PLAYNOVA server running on http://0.0.0.0:${port}`);
+    console.log(`PLAYNOVA server running on http://0.0.0.0:${port} (mode=${useProdStatic ? 'production-static' : 'vite-dev'})`);
   });
 }
 

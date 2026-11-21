@@ -46,6 +46,7 @@ interface HomepageHeroProps {
   topLeaders: LeaderboardEntry[];
   tournaments: TournamentItem[];
   onPlayNow: (desiredView?: AppView) => void;
+  onOpenMultiplayer: (gameId?: GameId) => void;
   onNavigatePublic: (view: 'games' | 'tournaments' | 'leaderboard' | 'link_preview') => void;
 }
 
@@ -54,6 +55,7 @@ export function HomepageHero({
   topLeaders,
   tournaments,
   onPlayNow,
+  onOpenMultiplayer,
   onNavigatePublic,
 }: HomepageHeroProps) {
   const [selectedCategory, setSelectedCategory] = useState<'All' | GameCategory>('All');
@@ -254,7 +256,7 @@ export function HomepageHero({
             </div>
             <button
               type="button"
-              onClick={() => onPlayNow('multiplayer')}
+              onClick={() => onOpenMultiplayer()}
               className="text-xs font-semibold text-[#38BDF8] hover:text-white cursor-pointer"
             >
               Open Lobby →
@@ -265,7 +267,7 @@ export function HomepageHero({
               <button
                 key={g.id}
                 type="button"
-                onClick={() => onPlayNow('multiplayer')}
+                onClick={() => onOpenMultiplayer(g.id)}
                 className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-[#060811] p-3.5 text-left transition hover:border-[#38BDF8]/50 cursor-pointer"
               >
                 <div>

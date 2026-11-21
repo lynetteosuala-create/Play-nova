@@ -1,0 +1,6 @@
+{
+  "name": "GAMEVERSE",
+  "description": "GAMEVERSE — Play. Compete. Earn. Conquer. Unified multi-game platform combining Tic-Tac-Toe, Rock-Paper-Scissors, and Guess the Number with shared XP, coins, challenges, leaderboards, link previews, and real SQLite persistence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

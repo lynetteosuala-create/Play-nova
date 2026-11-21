@@ -2,8 +2,13 @@ import { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { ArrowLeft, Cpu, Flame, Hand, RotateCcw, Scissors, Shield, Trophy, Users } from 'lucide-react';
 import { GAME_CATALOG } from '../game/catalog.ts';
+import {
+  chooseLocalRpsAiMove,
+  recordLocalInstantMatch,
+  resolveLocalRpsOutcome,
+} from '../game/localArcadeEngine.ts';
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../types.ts';
-import { apiFetch } from '../utils/api.ts';
+import { apiFetch, getStoredPlayerToken } from '../utils/api.ts';
 import { soundFx } from '../utils/sound.ts';
 
 type RpsMove = 'rock' | 'paper' | 'scissors';
@@ -82,26 +87,70 @@ export function RockPaperScissorsGame({
     await new Promise((r) => setTimeout(r, 860));
     setCountdown(null);
 
-    try {
-      const res = await apiFetch<{
-        ok: boolean;
-        playerMove: RpsMove;
-        opponentMove: RpsMove;
-        outcome: 'win' | 'loss' | 'draw';
-        rewards: { scoreDelta: number; xpEarned: number; coinsEarned: number };
-        player: PlayerProfile;
-        newlyUnlocked: string[];
-        completedChallenges: string[];
-      }>('/api/games/rps/play', {
-        method: 'POST',
-        body: JSON.stringify({
-          mode,
-          difficulty,
-          playerMove: move1,
-          playerTwoMove: move2,
-          recentMoves: recentPlayerMoves,
-        }),
+    const resolveLocally = () => {
+      const oppMove: RpsMove =
+        mode === 'local_2p' && move2
+          ? move2
+          : chooseLocalRpsAiMove(difficulty, recentPlayerMoves);
+      const outcome = resolveLocalRpsOutcome(move1, oppMove);
+      const scoreDelta =
+        outcome === 'win'
+          ? difficulty === 'hard'
+            ? 85
+            : difficulty === 'medium'
+            ? 65
+            : 45
+          : outcome === 'draw'
+          ? 20
+          : 5;
+      const recorded = recordLocalInstantMatch(player, {
+        gameId: 'rps',
+        mode,
+        difficulty,
+        outcome,
+        opponentLabel: mode === 'local_2p' ? 'Local Player 2' : `RPS AI (${difficulty})`,
+        scoreDelta,
+        durationSec: 4,
+        summary: `${move1} vs ${oppMove}`,
       });
+      return {
+        playerMove: move1,
+        opponentMove: oppMove,
+        outcome,
+        rewards: recorded.rewards,
+        player: recorded.player,
+        newlyUnlocked: recorded.newlyUnlocked,
+        completedChallenges: recorded.completedChallenges,
+      };
+    };
+
+    try {
+      const hasServerSession = Boolean(getStoredPlayerToken()) && !player.id.startsWith('local-');
+      const res = hasServerSession
+        ? await apiFetch<{
+            ok: boolean;
+            playerMove: RpsMove;
+            opponentMove: RpsMove;
+            outcome: 'win' | 'loss' | 'draw';
+            rewards: { scoreDelta: number; xpEarned: number; coinsEarned: number };
+            player: PlayerProfile;
+            newlyUnlocked: string[];
+            completedChallenges: string[];
+          }>(
+            '/api/games/rps/play',
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                mode,
+                difficulty,
+                playerMove: move1,
+                playerTwoMove: move2,
+                recentMoves: recentPlayerMoves,
+              }),
+            },
+            { suppressSessionEvent: true }
+          ).catch(() => resolveLocally())
+        : resolveLocally();
 
       setRecentPlayerMoves((prev) => [move1, ...prev].slice(0, 8));
       setResult({

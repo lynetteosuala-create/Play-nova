@@ -1,8 +1,9 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowDown, ArrowLeft, ArrowUp, Calendar, CheckCircle2, Clock, Play, RotateCcw, Users } from 'lucide-react';
 import { GAME_CATALOG, GUESS_PRESETS } from '../game/catalog.ts';
+import { computeGuessProximity, recordLocalInstantMatch } from '../game/localArcadeEngine.ts';
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../types.ts';
-import { apiFetch } from '../utils/api.ts';
+import { apiFetch, getStoredPlayerToken } from '../utils/api.ts';
 import { soundFx } from '../utils/sound.ts';
 
 interface GuessNumberGameProps {
@@ -29,6 +30,8 @@ export function GuessNumberGame({
     maxAttempts: number;
     timeLimitSec: number;
     isDaily: boolean;
+    localSecret?: number;
+    presetDifficulty?: DifficultyLevel | 'daily';
   } | null>(null);
 
   const [guessInput, setGuessInput] = useState('');
@@ -64,6 +67,23 @@ export function GuessNumberGame({
 
   const submitTimeout = async () => {
     if (!session || finishedState) return;
+    if (session.localSecret !== undefined) {
+      const recorded = recordLocalInstantMatch(player, {
+        gameId: 'guess_number',
+        mode: session.isDaily ? 'daily_vault' : 'solo',
+        difficulty: session.presetDifficulty === 'hard' ? 'hard' : session.presetDifficulty === 'easy' ? 'easy' : 'medium',
+        outcome: 'loss',
+        opponentLabel: 'Number Vault',
+        scoreDelta: 10,
+        durationSec: session.timeLimitSec,
+        summary: `Timed out (${guesses.length}/${session.maxAttempts} guesses)`,
+      });
+      soundFx.playLoss();
+      setFinishedState({ status: 'timeout', secretNumber: session.localSecret, rewards: recorded.rewards });
+      onProgressUpdated(recorded.player, recorded.newlyUnlocked, recorded.completedChallenges);
+      return;
+    }
+
     setBusy(true);
     try {
       const res = await apiFetch<{
@@ -73,10 +93,14 @@ export function GuessNumberGame({
         player: PlayerProfile;
         newlyUnlocked: string[];
         completedChallenges: string[];
-      }>('/api/games/guess/attempt', {
-        method: 'POST',
-        body: JSON.stringify({ sessionId: session.sessionId, timedOut: true }),
-      });
+      }>(
+        '/api/games/guess/attempt',
+        {
+          method: 'POST',
+          body: JSON.stringify({ sessionId: session.sessionId, timedOut: true }),
+        },
+        { suppressSessionEvent: true }
+      );
       soundFx.playLoss();
       setFinishedState({ status: 'timeout', secretNumber: res.secretNumber, rewards: res.rewards });
       onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);
@@ -89,8 +113,38 @@ export function GuessNumberGame({
 
   const startRound = async (presetKey = selectedPreset) => {
     setError(null);
-    setBusy(true);
     soundFx.playSelect();
+
+    const startLocalRound = () => {
+      const preset = GUESS_PRESETS[presetKey];
+      const secret = preset.min + Math.floor(Math.random() * (preset.max - preset.min + 1));
+      setSession({
+        sessionId: `local_guess_${Date.now().toString(36)}`,
+        min: preset.min,
+        max: preset.max,
+        maxAttempts: preset.maxAttempts,
+        timeLimitSec: preset.timeLimitSec,
+        isDaily: presetKey === 'daily',
+        localSecret: secret,
+        presetDifficulty: presetKey,
+      });
+      setLowBound(preset.min);
+      setHighBound(preset.max);
+      setTimeLeft(preset.timeLimitSec);
+      setGuesses([]);
+      setGuessInput('');
+      setFeedback(`Vault locked between ${preset.min} and ${preset.max}. Submit your first guess.`);
+      setProximity(null);
+      setFinishedState(null);
+    };
+
+    const hasServerSession = Boolean(getStoredPlayerToken()) && !player.id.startsWith('local-');
+    if (!hasServerSession) {
+      startLocalRound();
+      return;
+    }
+
+    setBusy(true);
     try {
       const res = await apiFetch<{
         ok: boolean;
@@ -100,10 +154,14 @@ export function GuessNumberGame({
         maxAttempts: number;
         timeLimitSec: number;
         isDaily: boolean;
-      }>('/api/games/guess/start', {
-        method: 'POST',
-        body: JSON.stringify({ difficulty: presetKey }),
-      });
+      }>(
+        '/api/games/guess/start',
+        {
+          method: 'POST',
+          body: JSON.stringify({ difficulty: presetKey }),
+        },
+        { suppressSessionEvent: true }
+      );
       setSession({
         sessionId: res.sessionId,
         min: res.min,
@@ -120,8 +178,8 @@ export function GuessNumberGame({
       setFeedback(`Vault locked between ${res.min} and ${res.max}. Submit your first guess.`);
       setProximity(null);
       setFinishedState(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to start challenge.');
+    } catch {
+      startLocalRound();
     } finally {
       setBusy(false);
     }
@@ -137,8 +195,66 @@ export function GuessNumberGame({
     }
 
     setError(null);
-    setBusy(true);
     soundFx.playClick();
+
+    if (session.localSecret !== undefined) {
+      const secret = session.localSecret;
+      const hint: 'higher' | 'lower' | 'correct' = num < secret ? 'higher' : num > secret ? 'lower' : 'correct';
+      const nextGuesses = [...guesses, { value: num, hint }];
+      setGuesses(nextGuesses);
+      setGuessInput('');
+
+      const diffLevel: DifficultyLevel =
+        session.presetDifficulty === 'hard' ? 'hard' : session.presetDifficulty === 'easy' ? 'easy' : 'medium';
+
+      if (hint === 'correct') {
+        const efficiencyBonus = Math.max(1, session.maxAttempts - nextGuesses.length + 1) * 18;
+        const recorded = recordLocalInstantMatch(player, {
+          gameId: 'guess_number',
+          mode: session.isDaily ? 'daily_vault' : 'solo',
+          difficulty: diffLevel,
+          outcome: 'win',
+          opponentLabel: 'Number Vault',
+          scoreDelta: 75 + efficiencyBonus + Math.round(timeLeft * 0.6),
+          durationSec: Math.max(4, session.timeLimitSec - timeLeft),
+          summary: `Cracked ${secret} in ${nextGuesses.length} guesses`,
+        });
+        soundFx.playWin();
+        setFinishedState({ status: 'correct', secretNumber: secret, rewards: recorded.rewards });
+        setFeedback(`Vault Cracked! Secret number was ${secret}.`);
+        setProximity(null);
+        onProgressUpdated(recorded.player, recorded.newlyUnlocked, recorded.completedChallenges);
+      } else if (nextGuesses.length >= session.maxAttempts) {
+        const recorded = recordLocalInstantMatch(player, {
+          gameId: 'guess_number',
+          mode: session.isDaily ? 'daily_vault' : 'solo',
+          difficulty: diffLevel,
+          outcome: 'loss',
+          opponentLabel: 'Number Vault',
+          scoreDelta: 12,
+          durationSec: Math.max(4, session.timeLimitSec - timeLeft),
+          summary: `Out of attempts (secret was ${secret})`,
+        });
+        soundFx.playLoss();
+        setFinishedState({ status: 'out_of_attempts', secretNumber: secret, rewards: recorded.rewards });
+        setFeedback(`No attempts left. The secret number was ${secret}.`);
+        setProximity(null);
+        onProgressUpdated(recorded.player, recorded.newlyUnlocked, recorded.completedChallenges);
+      } else if (hint === 'higher') {
+        soundFx.playSelect();
+        setLowBound((b) => Math.max(b, num + 1));
+        setFeedback(`TOO LOW — The secret number is HIGHER than ${num}.`);
+        setProximity(computeGuessProximity(num, secret, session.min, session.max));
+      } else {
+        soundFx.playSelect();
+        setHighBound((b) => Math.min(b, num - 1));
+        setFeedback(`TOO HIGH — The secret number is LOWER than ${num}.`);
+        setProximity(computeGuessProximity(num, secret, session.min, session.max));
+      }
+      return;
+    }
+
+    setBusy(true);
     try {
       const res = await apiFetch<{
         ok: boolean;
@@ -152,10 +268,14 @@ export function GuessNumberGame({
         player?: PlayerProfile;
         newlyUnlocked?: string[];
         completedChallenges?: string[];
-      }>('/api/games/guess/attempt', {
-        method: 'POST',
-        body: JSON.stringify({ sessionId: session.sessionId, guess: num }),
-      });
+      }>(
+        '/api/games/guess/attempt',
+        {
+          method: 'POST',
+          body: JSON.stringify({ sessionId: session.sessionId, guess: num }),
+        },
+        { suppressSessionEvent: true }
+      );
 
       setGuesses(res.guesses);
       setGuessInput('');

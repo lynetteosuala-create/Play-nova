@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Gauge, Play, RotateCcw, Trophy, Zap } from 'lucide-react';
 import { GAME_CATALOG } from '../../game/catalog.ts';
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
-import { apiFetch } from '../../utils/api.ts';
+import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
 import { soundFx } from '../../utils/sound.ts';
 
 interface ReactionTestGameProps {
@@ -71,23 +71,15 @@ export function ReactionTestGame({
 
     const scoreDelta = Math.max(25, Math.min(280, Math.round(420 - avg)));
     try {
-      const res = await apiFetch<{
-        rewards: { scoreDelta: number; xpEarned: number; coinsEarned: number };
-        player: PlayerProfile;
-        newlyUnlocked: string[];
-        completedChallenges: string[];
-      }>('/api/games/complete', {
-        method: 'POST',
-        body: JSON.stringify({
-          gameId: 'reaction_test',
-          mode: '5_round_reflex',
-          difficulty,
-          outcome,
-          opponentLabel: `Ghost AI (${aiBenchmarkMs}ms)`,
-          scoreDelta,
-          durationSec: 15,
-          summary: `Avg ${avg}ms across 5 rounds (Target ≤${aiBenchmarkMs}ms)`,
-        }),
+      const res = await completeSinglePlayerGame(player, {
+        gameId: 'reaction_test',
+        mode: '5_round_reflex',
+        difficulty,
+        outcome,
+        opponentLabel: `Ghost AI (${aiBenchmarkMs}ms)`,
+        scoreDelta,
+        durationSec: 15,
+        summary: `Avg ${avg}ms across 5 rounds (Target ≤${aiBenchmarkMs}ms)`,
       });
       setRewardBanner(res.rewards);
       onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);

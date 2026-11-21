@@ -10,8 +10,13 @@ import {
   normalizeTttConfig,
   recommendedBoardSize,
 } from '../game/tttRules.ts';
+import {
+  chooseLocalTttAiMove,
+  completeSinglePlayerGame,
+  recordLocalInstantMatch,
+} from '../game/localArcadeEngine.ts';
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../types.ts';
-import { apiFetch } from '../utils/api.ts';
+import { apiFetch, getStoredPlayerToken } from '../utils/api.ts';
 import { soundFx } from '../utils/sound.ts';
 
 type CellVal = 'X' | 'O' | null;
@@ -102,6 +107,32 @@ export function TicTacToeGame({
       return;
     }
 
+    const startLocalAiMatch = () => {
+      const nextBoard: CellVal[] = Array(cfg.boardSize * cfg.boardSize).fill(null);
+      if (playerMark === 'O') {
+        const aiIdx = chooseLocalTttAiMove(nextBoard, difficulty, 'X', cfg.boardSize, cfg.winTarget);
+        if (aiIdx >= 0) nextBoard[aiIdx] = 'X';
+      }
+      setSessionId(`local_ttt_${Date.now().toString(36)}`);
+      setMatchBoardSize(cfg.boardSize);
+      setMatchWinTarget(cfg.winTarget);
+      setLocalStartedAt(Date.now());
+      setBoard(nextBoard);
+      setTurn(playerMark);
+      setPhase('playing');
+      setStatusMessage(
+        playerMark === 'O'
+          ? `AI opened with X on the ${cfg.boardSize}×${cfg.boardSize} board. Align ${cfg.winTarget} in a row as O.`
+          : `Your turn as X. Align ${cfg.winTarget} in a row horizontally, vertically, or diagonally.`
+      );
+    };
+
+    const hasServerSession = Boolean(getStoredPlayerToken()) && !player.id.startsWith('local-');
+    if (!hasServerSession) {
+      startLocalAiMatch();
+      return;
+    }
+
     setBusy(true);
     try {
       const res = await apiFetch<{
@@ -110,15 +141,19 @@ export function TicTacToeGame({
         board: CellVal[];
         boardSize: number;
         winTarget: number;
-      }>('/api/games/tictactoe/start', {
-        method: 'POST',
-        body: JSON.stringify({
-          difficulty,
-          playerMark,
-          winTarget: cfg.winTarget,
-          boardSize: cfg.boardSize,
-        }),
-      });
+      }>(
+        '/api/games/tictactoe/start',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            difficulty,
+            playerMark,
+            winTarget: cfg.winTarget,
+            boardSize: cfg.boardSize,
+          }),
+        },
+        { suppressSessionEvent: true }
+      );
       setSessionId(res.sessionId);
       setMatchBoardSize(res.boardSize);
       setMatchWinTarget(res.winTarget);
@@ -130,8 +165,8 @@ export function TicTacToeGame({
           ? `AI opened with X on the ${res.boardSize}×${res.boardSize} board. Align ${res.winTarget} in a row as O.`
           : `Your turn as X. Align ${res.winTarget} in a row horizontally, vertically, or diagonally.`
       );
-    } catch (err) {
-      setStatusMessage(err instanceof Error ? err.message : 'Unable to start Tic-Tac-Toe match.');
+    } catch {
+      startLocalAiMatch();
     } finally {
       setBusy(false);
     }
@@ -166,31 +201,94 @@ export function TicTacToeGame({
         setSessionScore((s) => ({ ...s, wins: s.wins + 1 }));
       }
 
-      try {
-        const res = await apiFetch<{
-          player: PlayerProfile;
-          rewards: { scoreDelta: number; xpEarned: number; coinsEarned: number };
-          newlyUnlocked: string[];
-          completedChallenges: string[];
-        }>('/api/games/tictactoe/local-complete', {
-          method: 'POST',
-          body: JSON.stringify({
-            winner: evalRes.winner,
-            boardSize: matchBoardSize,
-            winTarget: matchWinTarget,
-            durationSec: Math.max(3, Math.round((Date.now() - localStartedAt) / 1000)),
-          }),
-        });
-        setRewardBanner(res.rewards);
-        onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);
-      } catch {
-        // non-fatal
-      }
+      const localRes = await completeSinglePlayerGame(player, {
+        gameId: 'tictactoe',
+        mode: 'local_2p',
+        difficulty: 'medium',
+        outcome: evalRes.winner === 'draw' ? 'draw' : 'win',
+        opponentLabel: 'Local Player 2',
+        scoreDelta: evalRes.winner === 'draw' ? 25 : 40,
+        durationSec: Math.max(3, Math.round((Date.now() - localStartedAt) / 1000)),
+        summary:
+          evalRes.winner === 'draw'
+            ? `${matchBoardSize}×${matchBoardSize} Local 2P Draw`
+            : `Player ${evalRes.winner} won ${matchWinTarget}-in-a-row (${matchBoardSize}×${matchBoardSize})`,
+      });
+      setRewardBanner(localRes.rewards);
+      onProgressUpdated(localRes.player, localRes.newlyUnlocked, localRes.completedChallenges);
       return;
     }
 
     if (!sessionId) return;
     soundFx.playClick();
+
+    const executeLocalAiTurn = () => {
+      const nextBoard = [...board];
+      nextBoard[idx] = playerMark;
+      const aiMark: 'X' | 'O' = playerMark === 'X' ? 'O' : 'X';
+      let evalRes = evaluateTttBoard(nextBoard, matchBoardSize, matchWinTarget);
+      let aiMoveIndex: number | null = null;
+
+      if (!evalRes.winner) {
+        aiMoveIndex = chooseLocalTttAiMove(nextBoard, difficulty, aiMark, matchBoardSize, matchWinTarget);
+        if (aiMoveIndex >= 0) {
+          nextBoard[aiMoveIndex] = aiMark;
+          evalRes = evaluateTttBoard(nextBoard, matchBoardSize, matchWinTarget);
+        }
+      }
+
+      setBoard(nextBoard);
+      if (!evalRes.winner) {
+        setStatusMessage(
+          aiMoveIndex !== null
+            ? `AI responded on square #${aiMoveIndex + 1}. Your move as ${playerMark}.`
+            : `Your turn as ${playerMark}.`
+        );
+        return;
+      }
+
+      setWinLine(evalRes.line);
+      const outcome: 'win' | 'loss' | 'draw' =
+        evalRes.winner === 'draw' ? 'draw' : evalRes.winner === playerMark ? 'win' : 'loss';
+      if (outcome === 'win') {
+        soundFx.playWin();
+        setOutcomeBanner(`Victory! ${matchWinTarget}-in-a-Row Completed`);
+        setSessionScore((s) => ({ ...s, wins: s.wins + 1 }));
+      } else if (outcome === 'draw') {
+        soundFx.playDraw();
+        setOutcomeBanner('Draw — Tactical Stalemate');
+        setSessionScore((s) => ({ ...s, draws: s.draws + 1 }));
+      } else {
+        soundFx.playLoss();
+        setOutcomeBanner(`Defeat — AI Completed ${matchWinTarget}-in-a-Row`);
+        setSessionScore((s) => ({ ...s, losses: s.losses + 1 }));
+      }
+      setStatusMessage('Round complete. Press Rematch to play again.');
+      const scoreDelta =
+        outcome === 'win'
+          ? (difficulty === 'hard' ? 140 : difficulty === 'medium' ? 100 : 70) + (matchWinTarget - 3) * 15
+          : outcome === 'draw'
+          ? 35
+          : 10;
+      const recorded = recordLocalInstantMatch(player, {
+        gameId: 'tictactoe',
+        mode: 'vs_ai',
+        difficulty,
+        outcome,
+        opponentLabel: `PLAYNOVA AI (${difficulty})`,
+        scoreDelta,
+        durationSec: Math.max(3, Math.round((Date.now() - localStartedAt) / 1000)),
+        summary: `${matchBoardSize}×${matchBoardSize} (${matchWinTarget}-in-a-row) vs ${difficulty} AI`,
+      });
+      setRewardBanner(recorded.rewards);
+      onProgressUpdated(recorded.player, recorded.newlyUnlocked, recorded.completedChallenges);
+    };
+
+    if (sessionId.startsWith('local_ttt_')) {
+      executeLocalAiTurn();
+      return;
+    }
+
     setBusy(true);
     try {
       const res = await apiFetch<{
@@ -206,10 +304,14 @@ export function TicTacToeGame({
         player?: PlayerProfile;
         newlyUnlocked?: string[];
         completedChallenges?: string[];
-      }>('/api/games/tictactoe/move', {
-        method: 'POST',
-        body: JSON.stringify({ sessionId, cellIndex: idx }),
-      });
+      }>(
+        '/api/games/tictactoe/move',
+        {
+          method: 'POST',
+          body: JSON.stringify({ sessionId, cellIndex: idx }),
+        },
+        { suppressSessionEvent: true }
+      );
 
       setBoard(res.board);
       if (!res.finished) {
@@ -239,8 +341,9 @@ export function TicTacToeGame({
           onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);
         }
       }
-    } catch (err) {
-      setStatusMessage(err instanceof Error ? err.message : 'Move failed.');
+    } catch {
+      setSessionId(`local_ttt_${Date.now().toString(36)}`);
+      executeLocalAiTurn();
     } finally {
       setBusy(false);
     }

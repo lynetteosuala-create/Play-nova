@@ -85,7 +85,7 @@ export async function apiFetch<T>(
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (res.status === 401 && !suppressSessionEvent && typeof window !== 'undefined') {
+    if (res.status === 401 && !suppressSessionEvent && token && typeof window !== 'undefined') {
       window.dispatchEvent(
         new CustomEvent('gv:session-expired', {
           detail: { message: data.error || 'Your session expired. Sign back in to continue.' },

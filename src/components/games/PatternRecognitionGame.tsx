@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { ArrowLeft, Heart, Lightbulb, Play, RotateCcw, Sparkles, Trophy } from 'lucide-react';
 import { GAME_CATALOG } from '../../game/catalog.ts';
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
-import { apiFetch } from '../../utils/api.ts';
+import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
 import { soundFx } from '../../utils/sound.ts';
 
 interface PatternRecognitionGameProps {
@@ -83,23 +83,15 @@ export function PatternRecognitionGame({
     else soundFx.playLoss();
 
     try {
-      const res = await apiFetch<{
-        rewards: { scoreDelta: number; xpEarned: number; coinsEarned: number };
-        player: PlayerProfile;
-        newlyUnlocked: string[];
-        completedChallenges: string[];
-      }>('/api/games/complete', {
-        method: 'POST',
-        body: JSON.stringify({
-          gameId: 'pattern_recognition',
-          mode: 'matrix_sequence',
-          difficulty,
-          outcome,
-          opponentLabel: `AI Target (Lv ${targetWinLevel})`,
-          scoreDelta: Math.max(20, finalScore),
-          durationSec: Math.max(6, Math.round((Date.now() - startedAt) / 1000)),
-          summary: `Reached Level ${finalLevel} (${finalScore} pts)`,
-        }),
+      const res = await completeSinglePlayerGame(player, {
+        gameId: 'pattern_recognition',
+        mode: 'matrix_sequence',
+        difficulty,
+        outcome,
+        opponentLabel: `AI Target (Lv ${targetWinLevel})`,
+        scoreDelta: Math.max(20, finalScore),
+        durationSec: Math.max(6, Math.round((Date.now() - startedAt) / 1000)),
+        summary: `Reached Level ${finalLevel} (${finalScore} pts)`,
       });
       setRewardBanner(res.rewards);
       onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);

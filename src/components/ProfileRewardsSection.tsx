@@ -140,6 +140,11 @@ export function ProfileRewardsSection({
   }, [player.avatarConfig]);
 
   const loadWallet = async () => {
+    if (player.id.startsWith('local-')) {
+      setWalletData({ totalEarned: 0, totalSpent: 0, transactions: [] });
+      setLoadingWallet(false);
+      return;
+    }
     setLoadingWallet(true);
     try {
       const res = await apiFetch<{
@@ -147,7 +152,7 @@ export function ProfileRewardsSection({
         totalEarned: number;
         totalSpent: number;
         transactions: CoinTransactionItem[];
-      }>('/api/wallet/transactions');
+      }>('/api/wallet/transactions', {}, { suppressSessionEvent: true });
       setWalletData({
         totalEarned: res.totalEarned ?? 0,
         totalSpent: res.totalSpent ?? 0,
@@ -162,7 +167,7 @@ export function ProfileRewardsSection({
 
   useEffect(() => {
     void loadWallet();
-  }, [player.coins]);
+  }, [player.id, player.coins]);
 
   const xpPercent = Math.min(100, Math.round((player.currentLevelXp / Math.max(1, player.nextLevelXp)) * 100));
   const unlockedCount = achievements.filter((a) => a.unlocked).length;
@@ -170,6 +175,13 @@ export function ProfileRewardsSection({
   async function handleSaveAvatarConfig(nextCfg: AvatarConfig) {
     setSavingAvatar(true);
     setFeedback(null);
+    if (player.id.startsWith('local-')) {
+      onPlayerUpdated({ ...player, avatarConfig: nextCfg });
+      soundFx.playClick();
+      setFeedback({ type: 'ok', text: 'Custom avatar saved to your local PLAYNOVA profile.' });
+      setSavingAvatar(false);
+      return;
+    }
     try {
       const res = await apiFetch<{ ok: boolean; player: PlayerProfile }>('/api/profile/avatar', {
         method: 'PATCH',
@@ -191,6 +203,12 @@ export function ProfileRewardsSection({
     const nextFavs = exists
       ? player.favoriteGames.filter((g) => g !== gameId)
       : [...player.favoriteGames, gameId];
+    if (player.id.startsWith('local-')) {
+      onPlayerUpdated({ ...player, favoriteGames: nextFavs });
+      soundFx.playClick();
+      setSavingFavs(false);
+      return;
+    }
     try {
       const res = await apiFetch<{ ok: boolean; player: PlayerProfile }>('/api/profile/favorites', {
         method: 'PATCH',
@@ -295,6 +313,11 @@ export function ProfileRewardsSection({
     setSavingSettings(true);
     const next = { ...player.settings, ...patch };
     soundFx.configure(next.soundEnabled, next.soundVolume);
+    if (player.id.startsWith('local-')) {
+      onPlayerUpdated({ ...player, settings: next });
+      setSavingSettings(false);
+      return;
+    }
     try {
       const res = await apiFetch<{ ok: boolean; player: PlayerProfile }>('/api/profile/settings', {
         method: 'PATCH',

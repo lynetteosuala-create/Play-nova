@@ -42,7 +42,12 @@ import { ReactionTestGame } from './components/games/ReactionTestGame.tsx';
 import { SudokuGame } from './components/games/SudokuGame.tsx';
 import { TriviaChallengeGame } from './components/games/TriviaChallengeGame.tsx';
 import { WordBattleGame } from './components/games/WordBattleGame.tsx';
-import { ALL_GAME_IDS, GAME_CATALOG, GAME_CATEGORIES } from './game/catalog.ts';
+import { ALL_GAME_IDS, DEFAULT_CHALLENGES, GAME_CATALOG, GAME_CATEGORIES, MULTIPLAYER_GAME_IDS } from './game/catalog.ts';
+import {
+  getLocalInstantMatches,
+  getOrCreateInstantLocalPlayer,
+  saveInstantLocalPlayer,
+} from './game/localArcadeEngine.ts';
 import type {
   AchievementItem,
   AppView,
@@ -58,7 +63,6 @@ import type {
   PlayerProfile,
   TournamentItem,
 } from './types.ts';
-import { MULTIPLAYER_GAME_IDS } from './game/catalog.ts';
 import { apiFetch, getStoredPlayerToken, setStoredPlayerToken } from './utils/api.ts';
 import {
   ensureAnonymousGuestSession,
@@ -71,8 +75,20 @@ import { wsClient, type RealtimeSnapshot } from './utils/wsClient.ts';
 
 export function App() {
   const initialRoute = parseLocationToRoute();
-  const [booting, setBooting] = useState(true);
-  const [player, setPlayer] = useState<PlayerProfile | null>(null);
+  const initialHasStoredToken = Boolean(getStoredPlayerToken());
+  const initialNeedsInstantSolo =
+    initialRoute.matched &&
+    !initialRoute.roomCode &&
+    (initialRoute.view === 'lobby' ||
+      initialRoute.view === 'profile' ||
+      ALL_GAME_IDS.includes(initialRoute.view as GameId));
+
+  const [booting, setBooting] = useState(
+    Boolean(initialHasStoredToken || initialRoute.roomCode || initialRoute.view === 'multiplayer')
+  );
+  const [player, setPlayer] = useState<PlayerProfile | null>(() =>
+    initialNeedsInstantSolo && !initialHasStoredToken ? getOrCreateInstantLocalPlayer() : null
+  );
   const [view, setView] = useState<AppView>(initialRoute.view);
   const [invalidRoutePath, setInvalidRoutePath] = useState<string | null>(
     initialRoute.matched ? null : initialRoute.invalidPath
@@ -104,7 +120,9 @@ export function App() {
   const [achievements, setAchievements] = useState<AchievementItem[]>([]);
   const [rewards, setRewards] = useState<CosmeticRewardItem[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [matches, setMatches] = useState<MatchRecord[]>([]);
+  const [matches, setMatches] = useState<MatchRecord[]>(() =>
+    initialNeedsInstantSolo && !initialHasStoredToken ? getLocalInstantMatches() : []
+  );
   const [topLeaders, setTopLeaders] = useState<LeaderboardEntry[]>([]);
 
   const [notifOpen, setNotifOpen] = useState(false);
@@ -163,6 +181,11 @@ export function App() {
   }, []);
 
   const loadProgressionAndBoard = useCallback(async () => {
+    if (playerRef.current?.id.startsWith('local-')) {
+      setMatches(getLocalInstantMatches());
+      await loadPublicTelemetry();
+      return;
+    }
     try {
       const [prog, board, statsRes, tourRes, annRes] = await Promise.all([
         apiFetch<{
@@ -171,8 +194,12 @@ export function App() {
           rewards: CosmeticRewardItem[];
           notifications: NotificationItem[];
           matches: MatchRecord[];
-        }>('/api/progression'),
-        apiFetch<{ leaderboard: LeaderboardEntry[] }>('/api/leaderboard?game=all&period=all'),
+        }>('/api/progression', {}, { suppressSessionEvent: true }),
+        apiFetch<{ leaderboard: LeaderboardEntry[] }>(
+          '/api/leaderboard?game=all&period=all',
+          {},
+          { suppressSessionEvent: true }
+        ),
         apiFetch<{
           onlinePlayers: number;
           activeRooms: number;
@@ -192,11 +219,51 @@ export function App() {
       setTournaments(tourRes.tournaments || []);
       setAnnouncements(annRes.announcements || []);
     } catch {
-      // session expiry handled via global event listener
+      // non-fatal progression fetch
+    }
+  }, [loadPublicTelemetry]);
+
+  const syncGuestSessionInBackground = useCallback(async () => {
+    try {
+      const { player: serverPlayer, token } = await ensureAnonymousGuestSession();
+      if (token) {
+        setStoredPlayerToken(token);
+        wsClient.connect(token);
+      }
+      const current = playerRef.current;
+      const keepLocalProgress =
+        current && current.id.startsWith('local-') && current.stats.totalPlayed > 0;
+      if (!keepLocalProgress) {
+        setPlayer(serverPlayer);
+        soundFx.configure(serverPlayer.settings.soundEnabled, serverPlayer.settings.soundVolume);
+        setSessionExpiredModal({ open: false, message: '' });
+        try {
+          const prog = await apiFetch<{
+            challenges: ChallengeItem[];
+            achievements: AchievementItem[];
+            rewards: CosmeticRewardItem[];
+            notifications: NotificationItem[];
+            matches: MatchRecord[];
+          }>('/api/progression', {}, { suppressSessionEvent: true });
+          setChallenges(prog.challenges || []);
+          setAchievements(prog.achievements || []);
+          setRewards(prog.rewards || []);
+          setNotifications(prog.notifications || []);
+          setMatches(prog.matches || []);
+        } catch {
+          // ignore if progression fails
+        }
+      }
+    } catch {
+      // Backend guest session unavailable (e.g. static hosting / offline) — keep local instant play active with zero disruption
     }
   }, []);
 
   const refreshPlayerProfile = useCallback(async () => {
+    if (playerRef.current?.id.startsWith('local-')) {
+      setMatches(getLocalInstantMatches());
+      return;
+    }
     try {
       const res = await apiFetch<{
         authenticated: boolean;
@@ -218,11 +285,11 @@ export function App() {
     });
   }, []);
 
-  // Bootstrap session + public telemetry
+  // Bootstrap session + public telemetry (non-blocking for solo games & lobby)
   useEffect(() => {
     let active = true;
     async function init() {
-      await loadPublicTelemetry();
+      void loadPublicTelemetry();
       try {
         const res = await apiFetch<{
           authenticated: boolean;
@@ -237,9 +304,14 @@ export function App() {
             setStoredPlayerToken(activeToken);
             wsClient.connect(activeToken);
           }
-          setPlayer(res.player);
-          soundFx.configure(res.player.settings.soundEnabled, res.player.settings.soundVolume);
-          await loadProgressionAndBoard();
+          const current = playerRef.current;
+          const keepLocalProgress =
+            current && current.id.startsWith('local-') && current.stats.totalPlayed > 0;
+          if (!keepLocalProgress) {
+            setPlayer(res.player);
+            soundFx.configure(res.player.settings.soundEnabled, res.player.settings.soundVolume);
+            await loadProgressionAndBoard();
+          }
 
           if (pendingRoomCode) {
             const codeToJoin = pendingRoomCode;
@@ -248,27 +320,56 @@ export function App() {
             window.setTimeout(() => wsClient.joinRoomByCode(codeToJoin), 250);
           }
         } else {
+          setStoredPlayerToken(null);
           const parsed = parseLocationToRoute();
-          const needsGuest =
+          const needsMultiplayer =
+            parsed.matched && (Boolean(pendingRoomCode) || parsed.view === 'multiplayer');
+          const needsSoloInstant =
             parsed.matched &&
-            (Boolean(pendingRoomCode) ||
-              parsed.view === 'lobby' ||
-              parsed.view === 'multiplayer' ||
+            (parsed.view === 'lobby' ||
               parsed.view === 'profile' ||
               ALL_GAME_IDS.includes(parsed.view as GameId));
 
-          if (needsGuest) {
+          if (needsMultiplayer) {
             await enterAsAnonymousGuest(
-              pendingRoomCode ? 'multiplayer' : parsed.view,
+              'multiplayer',
               pendingRoomCode,
               parsed.multiplayerGame || undefined
             );
+          } else if (needsSoloInstant) {
+            if (!playerRef.current) {
+              const localGuest = getOrCreateInstantLocalPlayer();
+              setPlayer(localGuest);
+              setMatches(getLocalInstantMatches());
+              soundFx.configure(localGuest.settings.soundEnabled, localGuest.settings.soundVolume);
+            }
+            void syncGuestSessionInBackground();
           }
         }
       } catch (err) {
         const errData = err as Error & { status?: number };
         if (errData.status === 401) {
           setStoredPlayerToken(null);
+        }
+        const parsed = parseLocationToRoute();
+        const needsMultiplayer =
+          parsed.matched && (Boolean(pendingRoomCode) || parsed.view === 'multiplayer');
+        const needsSoloInstant =
+          parsed.matched &&
+          (parsed.view === 'lobby' ||
+            parsed.view === 'profile' ||
+            ALL_GAME_IDS.includes(parsed.view as GameId));
+        if (active && needsSoloInstant && !playerRef.current) {
+          const localGuest = getOrCreateInstantLocalPlayer();
+          setPlayer(localGuest);
+          setMatches(getLocalInstantMatches());
+          soundFx.configure(localGuest.settings.soundEnabled, localGuest.settings.soundVolume);
+        } else if (active && needsMultiplayer) {
+          await enterAsAnonymousGuest(
+            'multiplayer',
+            pendingRoomCode,
+            parsed.multiplayerGame || undefined
+          );
         }
       } finally {
         if (active) setBooting(false);
@@ -374,7 +475,12 @@ export function App() {
     completedChallenges?: string[]
   ) => {
     setPlayer(updatedPlayer);
-    void loadProgressionAndBoard();
+    if (updatedPlayer.id.startsWith('local-')) {
+      saveInstantLocalPlayer(updatedPlayer);
+      setMatches(getLocalInstantMatches());
+    } else {
+      void loadProgressionAndBoard();
+    }
 
     const items: string[] = [];
     if (newlyUnlocked && newlyUnlocked.length > 0) {
@@ -414,12 +520,26 @@ export function App() {
         ? resolveGameIdFromSlug(desiredView) || 'lobby'
         : desiredView;
 
-    soundFx.playSelect();
-    if (player) {
-      navigate(resolvedTarget);
+    if (resolvedTarget === 'multiplayer') {
+      handleOpenMultiplayerForGame();
       return;
     }
-    void enterAsAnonymousGuest(resolvedTarget);
+
+    soundFx.playSelect();
+    if (!player) {
+      const localGuest = getOrCreateInstantLocalPlayer();
+      setPlayer(localGuest);
+      setMatches(getLocalInstantMatches());
+      soundFx.configure(localGuest.settings.soundEnabled, localGuest.settings.soundVolume);
+      navigate(resolvedTarget);
+      void syncGuestSessionInBackground();
+      return;
+    }
+
+    navigate(resolvedTarget);
+    if (player.id.startsWith('local-')) {
+      void syncGuestSessionInBackground();
+    }
   };
 
   const handleOpenMultiplayerForGame = (gameId?: GameId) => {
@@ -428,7 +548,7 @@ export function App() {
         ? (gameId as MultiplayerGameId)
         : 'tictactoe';
     setMultiplayerGame(mpTarget);
-    if (player) {
+    if (player && !player.id.startsWith('local-')) {
       navigate('multiplayer', mpTarget);
       return;
     }
@@ -765,15 +885,28 @@ export function App() {
         </div>
       )}
 
-      {/* Launch Error Banner with Retry */}
+      {/* Launch Error Banner with Solo Fallback & Retry */}
       {launchError && (
         <div className="mx-auto mt-4 w-full max-w-7xl px-4 sm:px-6">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/45 px-4 py-3 text-sm text-rose-100">
             <div className="min-w-0 flex-1">
-              <p className="font-semibold text-white">Unable to launch PLAYNOVA Arena</p>
+              <p className="font-semibold text-white">
+                {launchError.retryView === 'multiplayer'
+                  ? 'Live Online Multiplayer Server Unavailable'
+                  : 'Unable to connect to PLAYNOVA backend'}
+              </p>
               <p className="mt-0.5 text-xs text-rose-200">{launchError.message}</p>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {launchError.retryView === 'multiplayer' && (
+                <button
+                  type="button"
+                  onClick={() => handlePlayAction(launchError.retryMultiplayerGame || 'tictactoe')}
+                  className="rounded-lg bg-[#8B5CF6] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
+                >
+                  Play Solo vs AI Instead
+                </button>
+              )}
               <button
                 type="button"
                 disabled={enteringGuest}
@@ -1140,7 +1273,12 @@ export function App() {
                   </div>
 
                   <div className="mt-4 space-y-3">
-                    {challenges.slice(0, 4).map((c) => {
+                    {(challenges.length > 0
+                      ? challenges
+                      : DEFAULT_CHALLENGES.map((c) => ({ ...c, progress: 0, completed: false }))
+                    )
+                      .slice(0, 4)
+                      .map((c) => {
                       const pct = Math.min(100, Math.round((c.progress / Math.max(1, c.targetCount)) * 100));
                       return (
                         <div key={c.id} className="rounded-lg border border-white/[0.06] bg-[#090D1A] p-3.5">
@@ -1541,7 +1679,12 @@ export function App() {
             achievements={achievements}
             rewards={rewards}
             matches={matches}
-            onPlayerUpdated={(p) => setPlayer(p)}
+            onPlayerUpdated={(p) => {
+              setPlayer(p);
+              if (p.id.startsWith('local-')) {
+                saveInstantLocalPlayer(p);
+              }
+            }}
             onRefreshProgression={() => void loadProgressionAndBoard()}
           />
         )}

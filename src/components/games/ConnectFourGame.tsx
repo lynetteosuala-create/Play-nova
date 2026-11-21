@@ -12,7 +12,7 @@ import {
   type C4Cell,
 } from '../../game/connectFour.ts';
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
-import { apiFetch } from '../../utils/api.ts';
+import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
 import { soundFx } from '../../utils/sound.ts';
 
 function dropC4Disc(board: C4Cell[], col: number, mark: 'R' | 'Y'): { board: C4Cell[]; row: number } | null {
@@ -85,28 +85,20 @@ export function ConnectFourGame({
       outcome === 'win' ? (mode === 'local_2p' ? 50 : difficulty === 'hard' ? 160 : difficulty === 'medium' ? 120 : 90) : outcome === 'draw' ? 40 : 12;
 
     try {
-      const res = await apiFetch<{
-        rewards: { scoreDelta: number; xpEarned: number; coinsEarned: number };
-        player: PlayerProfile;
-        newlyUnlocked: string[];
-        completedChallenges: string[];
-      }>('/api/games/complete', {
-        method: 'POST',
-        body: JSON.stringify({
-          gameId: 'connect_four',
-          mode,
-          difficulty,
-          outcome,
-          opponentLabel: mode === 'local_2p' ? 'Local Player 2' : `Connect 4 AI (${difficulty})`,
-          scoreDelta,
-          durationSec: Math.max(4, Math.round((Date.now() - startedAt) / 1000)),
-          summary:
-            winner === 'draw'
-              ? '7×6 Connect Four draw'
-              : winner === 'R'
-              ? 'Connected 4 discs in neon arena'
-              : 'Defeated by Connect Four AI',
-        }),
+      const res = await completeSinglePlayerGame(player, {
+        gameId: 'connect_four',
+        mode,
+        difficulty,
+        outcome,
+        opponentLabel: mode === 'local_2p' ? 'Local Player 2' : `Connect 4 AI (${difficulty})`,
+        scoreDelta,
+        durationSec: Math.max(4, Math.round((Date.now() - startedAt) / 1000)),
+        summary:
+          winner === 'draw'
+            ? '7×6 Connect Four draw'
+            : winner === 'R'
+            ? 'Connected 4 discs in neon arena'
+            : 'Defeated by Connect Four AI',
       });
       setRewardBanner(res.rewards);
       onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);

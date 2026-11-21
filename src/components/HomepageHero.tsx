@@ -233,7 +233,7 @@ export function HomepageHero({
                   onClick={() => onPlayNow(game.id)}
                   className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#151D38] border border-white/[0.08] px-4 py-2.5 text-xs font-bold text-white transition group-hover:bg-[#8B5CF6] group-hover:border-[#8B5CF6] cursor-pointer"
                 >
-                  Launch {game.name}
+                  Play Now
                   <ArrowRight className="h-3.5 w-3.5" />
                 </button>
               </div>

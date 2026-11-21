@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowLeft, Calculator, Clock, Flame, Play, RotateCcw, Trophy } from 'lucide-react';
 import { GAME_CATALOG } from '../../game/catalog.ts';
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
-import { apiFetch } from '../../utils/api.ts';
+import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
 import { soundFx } from '../../utils/sound.ts';
 
 interface MathPrompt {
@@ -98,23 +98,15 @@ export function QuickMathGame({
     else soundFx.playLoss();
 
     try {
-      const res = await apiFetch<{
-        rewards: { scoreDelta: number; xpEarned: number; coinsEarned: number };
-        player: PlayerProfile;
-        newlyUnlocked: string[];
-        completedChallenges: string[];
-      }>('/api/games/complete', {
-        method: 'POST',
-        body: JSON.stringify({
-          gameId: 'quick_math',
-          mode: 'sprint_60s',
-          difficulty,
-          outcome,
-          opponentLabel: `Speedbot AI (${aiBenchmark} pts)`,
-          scoreDelta: score,
-          durationSec: 60,
-          summary: `${solvedCount} solved · ${score} pts vs ${aiBenchmark} AI`,
-        }),
+      const res = await completeSinglePlayerGame(player, {
+        gameId: 'quick_math',
+        mode: 'sprint_60s',
+        difficulty,
+        outcome,
+        opponentLabel: `Speedbot AI (${aiBenchmark} pts)`,
+        scoreDelta: score,
+        durationSec: 60,
+        summary: `${solvedCount} solved · ${score} pts vs ${aiBenchmark} AI`,
       });
       setRewardBanner(res.rewards);
       onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);

@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowLeft, Clock, Lightbulb, RotateCcw, Sparkles, Trophy } from 'lucide-react';
 import { GAME_CATALOG } from '../../game/catalog.ts';
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
-import { apiFetch } from '../../utils/api.ts';
+import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
 import { soundFx } from '../../utils/sound.ts';
 
 const SCRAMBLE_BANK: Array<{ word: string; clue: string }> = [
@@ -85,23 +85,15 @@ export function WordBattleGame({
 
     setFinished({ outcome, text: summaryText });
     try {
-      const res = await apiFetch<{
-        rewards: { scoreDelta: number; xpEarned: number; coinsEarned: number };
-        player: PlayerProfile;
-        newlyUnlocked: string[];
-        completedChallenges: string[];
-      }>('/api/games/complete', {
-        method: 'POST',
-        body: JSON.stringify({
-          gameId: 'word_battle',
-          mode: subMode,
-          difficulty,
-          outcome,
-          opponentLabel: `Lexicon AI (${difficulty})`,
-          scoreDelta: Math.max(20, pScore),
-          durationSec: Math.max(6, Math.round((Date.now() - startedAt) / 1000)),
-          summary: summaryText,
-        }),
+      const res = await completeSinglePlayerGame(player, {
+        gameId: 'word_battle',
+        mode: subMode,
+        difficulty,
+        outcome,
+        opponentLabel: `Lexicon AI (${difficulty})`,
+        scoreDelta: Math.max(20, pScore),
+        durationSec: Math.max(6, Math.round((Date.now() - startedAt) / 1000)),
+        summary: summaryText,
       });
       setRewardBanner(res.rewards);
       onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);

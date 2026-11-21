@@ -20,7 +20,7 @@ function pieceSymbol(p: string): string {
   return PIECE_UNICODE[p] || '';
 }
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
-import { apiFetch } from '../../utils/api.ts';
+import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
 import { soundFx } from '../../utils/sound.ts';
 
 interface ChessGameProps {
@@ -79,23 +79,15 @@ export function ChessGame({
         : 15;
 
     try {
-      const res = await apiFetch<{
-        rewards: { scoreDelta: number; xpEarned: number; coinsEarned: number };
-        player: PlayerProfile;
-        newlyUnlocked: string[];
-        completedChallenges: string[];
-      }>('/api/games/complete', {
-        method: 'POST',
-        body: JSON.stringify({
-          gameId: 'chess',
-          mode,
-          difficulty,
-          outcome,
-          opponentLabel: mode === 'local_2p' ? 'Local Player 2' : `Chess AI (${difficulty})`,
-          scoreDelta,
-          durationSec: Math.max(8, Math.round((Date.now() - startedAt) / 1000)),
-          summary: reason,
-        }),
+      const res = await completeSinglePlayerGame(player, {
+        gameId: 'chess',
+        mode,
+        difficulty,
+        outcome,
+        opponentLabel: mode === 'local_2p' ? 'Local Player 2' : `Chess AI (${difficulty})`,
+        scoreDelta,
+        durationSec: Math.max(8, Math.round((Date.now() - startedAt) / 1000)),
+        summary: reason,
       });
       setRewardBanner(res.rewards);
       onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);

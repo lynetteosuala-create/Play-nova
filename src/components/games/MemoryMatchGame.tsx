@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { ArrowLeft, Cpu, RotateCcw, Sparkles, Trophy, User } from 'lucide-react';
 import { GAME_CATALOG } from '../../game/catalog.ts';
 import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
-import { apiFetch } from '../../utils/api.ts';
+import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
 import { soundFx } from '../../utils/sound.ts';
 
 const CARD_SYMBOLS = [
@@ -100,23 +100,15 @@ export function MemoryMatchGame({
       outcome === 'win' ? Math.max(70, gridPairs * 14 + pScore * 8 - Math.max(0, totalMoves - gridPairs * 2)) : outcome === 'draw' ? 45 : 15;
 
     try {
-      const res = await apiFetch<{
-        rewards: { scoreDelta: number; xpEarned: number; coinsEarned: number };
-        player: PlayerProfile;
-        newlyUnlocked: string[];
-        completedChallenges: string[];
-      }>('/api/games/complete', {
-        method: 'POST',
-        body: JSON.stringify({
-          gameId: 'memory_match',
-          mode,
-          difficulty,
-          outcome,
-          opponentLabel: mode === 'solo' ? `Solo ${gridPairs}-Pair Run` : `Memory AI (${difficulty})`,
-          scoreDelta,
-          durationSec: Math.max(5, Math.round((Date.now() - startedAt) / 1000)),
-          summary: text,
-        }),
+      const res = await completeSinglePlayerGame(player, {
+        gameId: 'memory_match',
+        mode,
+        difficulty,
+        outcome,
+        opponentLabel: mode === 'solo' ? `Solo ${gridPairs}-Pair Run` : `Memory AI (${difficulty})`,
+        scoreDelta,
+        durationSec: Math.max(5, Math.round((Date.now() - startedAt) / 1000)),
+        summary: text,
       });
       setRewardBanner(res.rewards);
       onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);

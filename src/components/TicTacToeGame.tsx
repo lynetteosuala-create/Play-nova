@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { ArrowLeft, Cpu, Grid3X3, Minus, Plus, RotateCcw, Trophy, Users } from 'lucide-react';
 import { GAME_CATALOG } from '../game/catalog.ts';
@@ -15,9 +15,11 @@ import {
   completeSinglePlayerGame,
   recordLocalInstantMatch,
 } from '../game/localArcadeEngine.ts';
-import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../types.ts';
-import { apiFetch, getStoredPlayerToken } from '../utils/api.ts';
+import { useUniversalMatchmaking } from '../hooks/useUniversalMatchmaking.ts';
+import type { MatchRecord, PlayerProfile } from '../types.ts';
 import { soundFx } from '../utils/sound.ts';
+import { wsClient } from '../utils/wsClient.ts';
+import { UniversalMatchBar } from './UniversalMatchBar.tsx';
 
 type CellVal = 'X' | 'O' | null;
 
@@ -27,7 +29,6 @@ interface TicTacToeGameProps {
   player: PlayerProfile;
   recentMatches: MatchRecord[];
   onProgressUpdated: (player: PlayerProfile, newlyUnlocked?: string[], completedChallenges?: string[]) => void;
-  onOpenMultiplayer?: () => void;
   onBack: () => void;
 }
 
@@ -35,38 +36,48 @@ export function TicTacToeGame({
   player,
   recentMatches,
   onProgressUpdated,
-  onOpenMultiplayer,
   onBack,
 }: TicTacToeGameProps) {
   const catalog = GAME_CATALOG[0];
-  const [phase, setPhase] = useState<'setup' | 'playing'>('setup');
-  const [mode, setMode] = useState<'vs_ai' | 'local_2p'>('vs_ai');
-  const [difficulty, setDifficulty] = useState<DifficultyLevel>('medium');
-  const [playerMark, setPlayerMark] = useState<'X' | 'O'>('X');
-
-  // Setup configuration (unrestricted: 3..12+ in a row, auto-expanding up to 15x15)
   const [winTargetInput, setWinTargetInput] = useState<number>(3);
   const [boardSizeMode, setBoardSizeMode] = useState<'auto' | 'custom'>('auto');
   const [customBoardSize, setCustomBoardSize] = useState<number>(3);
-
   const previewConfig = normalizeTttConfig(
     winTargetInput,
     boardSizeMode === 'auto' ? 'auto' : customBoardSize
   );
 
-  // Active match state
+  const mm = useUniversalMatchmaking('tictactoe', {
+    player,
+    tttBoardSize: previewConfig.boardSize,
+    tttWinTarget: previewConfig.winTarget,
+  });
+
+  const [showRulesDrawer, setShowRulesDrawer] = useState(false);
+  const [localMode, setLocalMode] = useState<'vs_ai' | 'local_2p'>('vs_ai');
+  const [playerMark, setPlayerMark] = useState<'X' | 'O'>('X');
   const [matchBoardSize, setMatchBoardSize] = useState<number>(3);
   const [matchWinTarget, setMatchWinTarget] = useState<number>(3);
-  const [sessionId, setSessionId] = useState<string | null>(null);
   const [board, setBoard] = useState<CellVal[]>(Array(9).fill(null));
   const [turn, setTurn] = useState<'X' | 'O'>('X');
   const [winLine, setWinLine] = useState<number[] | null>(null);
   const [outcomeBanner, setOutcomeBanner] = useState<string | null>(null);
-  const [statusMessage, setStatusMessage] = useState('Choose your board rules and opponent, then press Start Match.');
-  const [rewardBanner, setRewardBanner] = useState<{ scoreDelta: number; xpEarned: number; coinsEarned: number } | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('Your turn as X. Align 3 in a row to win.');
+  const [rewardBanner, setRewardBanner] = useState<{ scoreDelta: number; xpEarned: number; coinsEarned: number } | null>(
+    null
+  );
   const [localStartedAt, setLocalStartedAt] = useState<number>(Date.now());
   const [sessionScore, setSessionScore] = useState({ wins: 0, draws: 0, losses: 0 });
+
+  const isHuman = mm.matchPhase === 'human' && Boolean(mm.liveMatch?.tttState);
+  const tttServer = isHuman ? mm.liveMatch!.tttState! : null;
+  const myTeam: 'X' | 'O' = isHuman ? (mm.mySeat?.team === 'O' ? 'O' : 'X') : playerMark;
+
+  const activeBoard = tttServer ? tttServer.board : board;
+  const activeBoardSize = tttServer ? tttServer.boardSize : matchBoardSize;
+  const activeWinTarget = tttServer ? tttServer.winTarget : matchWinTarget;
+  const activeWinLine = tttServer ? tttServer.winLine : winLine;
+  const isFinished = tttServer ? Boolean(tttServer.winnerTeam) : Boolean(outcomeBanner);
 
   const tttMatches = recentMatches.filter((m) => m.gameId === 'tictactoe');
 
@@ -74,108 +85,62 @@ export function TicTacToeGame({
     const clamped = Math.max(MIN_WIN_TARGET, Math.min(MAX_WIN_TARGET, Math.floor(nextTarget || MIN_WIN_TARGET)));
     setWinTargetInput(clamped);
     const autoSize = recommendedBoardSize(clamped);
-    if (boardSizeMode === 'auto') {
-      setCustomBoardSize(autoSize);
-    } else if (customBoardSize < clamped) {
+    if (boardSizeMode === 'auto' || customBoardSize < clamped) {
       setCustomBoardSize(autoSize);
     }
     soundFx.playSelect();
   };
 
-  const startMatch = async () => {
+  const startLocalMatch = (overrideMode = localMode, overrideMark = playerMark) => {
     soundFx.playSelect();
     setWinLine(null);
     setOutcomeBanner(null);
     setRewardBanner(null);
+    setLocalMode(overrideMode);
+    setPlayerMark(overrideMark);
 
     const cfg = normalizeTttConfig(
       winTargetInput,
       boardSizeMode === 'auto' ? 'auto' : customBoardSize
     );
-
-    if (mode === 'local_2p') {
-      setSessionId(null);
-      setMatchBoardSize(cfg.boardSize);
-      setMatchWinTarget(cfg.winTarget);
-      setBoard(Array(cfg.boardSize * cfg.boardSize).fill(null));
-      setTurn('X');
-      setLocalStartedAt(Date.now());
-      setPhase('playing');
-      setStatusMessage(
-        `Player 1 (X) moves first. Connect ${cfg.winTarget} in a row on the ${cfg.boardSize}×${cfg.boardSize} grid!`
-      );
-      return;
+    const nextBoard: CellVal[] = Array(cfg.boardSize * cfg.boardSize).fill(null);
+    if (overrideMode === 'vs_ai' && overrideMark === 'O') {
+      const aiIdx = chooseLocalTttAiMove(nextBoard, mm.difficulty, 'X', cfg.boardSize, cfg.winTarget);
+      if (aiIdx >= 0) nextBoard[aiIdx] = 'X';
     }
-
-    const startLocalAiMatch = () => {
-      const nextBoard: CellVal[] = Array(cfg.boardSize * cfg.boardSize).fill(null);
-      if (playerMark === 'O') {
-        const aiIdx = chooseLocalTttAiMove(nextBoard, difficulty, 'X', cfg.boardSize, cfg.winTarget);
-        if (aiIdx >= 0) nextBoard[aiIdx] = 'X';
-      }
-      setSessionId(`local_ttt_${Date.now().toString(36)}`);
-      setMatchBoardSize(cfg.boardSize);
-      setMatchWinTarget(cfg.winTarget);
-      setLocalStartedAt(Date.now());
-      setBoard(nextBoard);
-      setTurn(playerMark);
-      setPhase('playing');
-      setStatusMessage(
-        playerMark === 'O'
-          ? `AI opened with X on the ${cfg.boardSize}×${cfg.boardSize} board. Align ${cfg.winTarget} in a row as O.`
-          : `Your turn as X. Align ${cfg.winTarget} in a row horizontally, vertically, or diagonally.`
-      );
-    };
-
-    const hasServerSession = Boolean(getStoredPlayerToken()) && !player.id.startsWith('local-');
-    if (!hasServerSession) {
-      startLocalAiMatch();
-      return;
-    }
-
-    setBusy(true);
-    try {
-      const res = await apiFetch<{
-        ok: boolean;
-        sessionId: string;
-        board: CellVal[];
-        boardSize: number;
-        winTarget: number;
-      }>(
-        '/api/games/tictactoe/start',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            difficulty,
-            playerMark,
-            winTarget: cfg.winTarget,
-            boardSize: cfg.boardSize,
-          }),
-        },
-        { suppressSessionEvent: true }
-      );
-      setSessionId(res.sessionId);
-      setMatchBoardSize(res.boardSize);
-      setMatchWinTarget(res.winTarget);
-      setBoard(res.board);
-      setTurn(playerMark);
-      setPhase('playing');
-      setStatusMessage(
-        playerMark === 'O'
-          ? `AI opened with X on the ${res.boardSize}×${res.boardSize} board. Align ${res.winTarget} in a row as O.`
-          : `Your turn as X. Align ${res.winTarget} in a row horizontally, vertically, or diagonally.`
-      );
-    } catch {
-      startLocalAiMatch();
-    } finally {
-      setBusy(false);
-    }
+    setMatchBoardSize(cfg.boardSize);
+    setMatchWinTarget(cfg.winTarget);
+    setBoard(nextBoard);
+    setTurn(overrideMode === 'local_2p' ? 'X' : overrideMark);
+    setLocalStartedAt(Date.now());
+    setShowRulesDrawer(false);
+    setStatusMessage(
+      overrideMode === 'local_2p'
+        ? `Player 1 (X) moves first. Connect ${cfg.winTarget} in a row!`
+        : overrideMark === 'O'
+        ? `AI opened with X. Align ${cfg.winTarget} in a row as O.`
+        : `Your turn as X. Align ${cfg.winTarget} in a row.`
+    );
   };
 
-  const handleCellClick = async (idx: number) => {
-    if (busy || outcomeBanner || board[idx] !== null) return;
+  // Start immediately when entering AI phase
+  useEffect(() => {
+    if (mm.matchPhase === 'ai') {
+      setStatusMessage(`Your turn as ${playerMark}. Align ${matchWinTarget} in a row.`);
+    }
+  }, [mm.matchPhase, matchWinTarget, playerMark]);
 
-    if (mode === 'local_2p') {
+  const handleCellClick = async (idx: number) => {
+    if (mm.matchPhase === 'searching' || isFinished || activeBoard[idx] !== null) return;
+
+    if (isHuman && tttServer) {
+      if (tttServer.activeSeatIndex !== mm.mySeatIndex) return;
+      soundFx.playSelect();
+      wsClient.emit('ttt:move', { cellIndex: idx });
+      return;
+    }
+
+    if (localMode === 'local_2p') {
       soundFx.playClick();
       const next = [...board];
       next[idx] = turn;
@@ -195,12 +160,9 @@ export function TicTacToeGame({
         setSessionScore((s) => ({ ...s, draws: s.draws + 1 }));
       } else {
         soundFx.playWin();
-        setOutcomeBanner(
-          `Player ${evalRes.winner === 'X' ? '1 (X)' : '2 (O)'} Wins (${matchWinTarget} in a row)!`
-        );
+        setOutcomeBanner(`Player ${evalRes.winner === 'X' ? '1 (X)' : '2 (O)'} Wins!`);
         setSessionScore((s) => ({ ...s, wins: s.wins + 1 }));
       }
-
       const localRes = await completeSinglePlayerGame(player, {
         gameId: 'tictactoe',
         mode: 'local_2p',
@@ -209,164 +171,92 @@ export function TicTacToeGame({
         opponentLabel: 'Local Player 2',
         scoreDelta: evalRes.winner === 'draw' ? 25 : 40,
         durationSec: Math.max(3, Math.round((Date.now() - localStartedAt) / 1000)),
-        summary:
-          evalRes.winner === 'draw'
-            ? `${matchBoardSize}×${matchBoardSize} Local 2P Draw`
-            : `Player ${evalRes.winner} won ${matchWinTarget}-in-a-row (${matchBoardSize}×${matchBoardSize})`,
+        summary: `${matchBoardSize}×${matchBoardSize} Local 2P`,
       });
       setRewardBanner(localRes.rewards);
       onProgressUpdated(localRes.player, localRes.newlyUnlocked, localRes.completedChallenges);
       return;
     }
 
-    if (!sessionId) return;
     soundFx.playClick();
+    const nextBoard = [...board];
+    nextBoard[idx] = playerMark;
+    const aiMark: 'X' | 'O' = playerMark === 'X' ? 'O' : 'X';
+    let evalRes = evaluateTttBoard(nextBoard, matchBoardSize, matchWinTarget);
+    let aiMoveIndex: number | null = null;
 
-    const executeLocalAiTurn = () => {
-      const nextBoard = [...board];
-      nextBoard[idx] = playerMark;
-      const aiMark: 'X' | 'O' = playerMark === 'X' ? 'O' : 'X';
-      let evalRes = evaluateTttBoard(nextBoard, matchBoardSize, matchWinTarget);
-      let aiMoveIndex: number | null = null;
-
-      if (!evalRes.winner) {
-        aiMoveIndex = chooseLocalTttAiMove(nextBoard, difficulty, aiMark, matchBoardSize, matchWinTarget);
-        if (aiMoveIndex >= 0) {
-          nextBoard[aiMoveIndex] = aiMark;
-          evalRes = evaluateTttBoard(nextBoard, matchBoardSize, matchWinTarget);
-        }
+    if (!evalRes.winner) {
+      aiMoveIndex = chooseLocalTttAiMove(nextBoard, mm.difficulty, aiMark, matchBoardSize, matchWinTarget);
+      if (aiMoveIndex >= 0) {
+        nextBoard[aiMoveIndex] = aiMark;
+        evalRes = evaluateTttBoard(nextBoard, matchBoardSize, matchWinTarget);
       }
+    }
 
-      setBoard(nextBoard);
-      if (!evalRes.winner) {
-        setStatusMessage(
-          aiMoveIndex !== null
-            ? `AI responded on square #${aiMoveIndex + 1}. Your move as ${playerMark}.`
-            : `Your turn as ${playerMark}.`
-        );
-        return;
-      }
-
-      setWinLine(evalRes.line);
-      const outcome: 'win' | 'loss' | 'draw' =
-        evalRes.winner === 'draw' ? 'draw' : evalRes.winner === playerMark ? 'win' : 'loss';
-      if (outcome === 'win') {
-        soundFx.playWin();
-        setOutcomeBanner(`Victory! ${matchWinTarget}-in-a-Row Completed`);
-        setSessionScore((s) => ({ ...s, wins: s.wins + 1 }));
-      } else if (outcome === 'draw') {
-        soundFx.playDraw();
-        setOutcomeBanner('Draw — Tactical Stalemate');
-        setSessionScore((s) => ({ ...s, draws: s.draws + 1 }));
-      } else {
-        soundFx.playLoss();
-        setOutcomeBanner(`Defeat — AI Completed ${matchWinTarget}-in-a-Row`);
-        setSessionScore((s) => ({ ...s, losses: s.losses + 1 }));
-      }
-      setStatusMessage('Round complete. Press Rematch to play again.');
-      const scoreDelta =
-        outcome === 'win'
-          ? (difficulty === 'hard' ? 140 : difficulty === 'medium' ? 100 : 70) + (matchWinTarget - 3) * 15
-          : outcome === 'draw'
-          ? 35
-          : 10;
-      const recorded = recordLocalInstantMatch(player, {
-        gameId: 'tictactoe',
-        mode: 'vs_ai',
-        difficulty,
-        outcome,
-        opponentLabel: `PLAYNOVA AI (${difficulty})`,
-        scoreDelta,
-        durationSec: Math.max(3, Math.round((Date.now() - localStartedAt) / 1000)),
-        summary: `${matchBoardSize}×${matchBoardSize} (${matchWinTarget}-in-a-row) vs ${difficulty} AI`,
-      });
-      setRewardBanner(recorded.rewards);
-      onProgressUpdated(recorded.player, recorded.newlyUnlocked, recorded.completedChallenges);
-    };
-
-    if (sessionId.startsWith('local_ttt_')) {
-      executeLocalAiTurn();
+    setBoard(nextBoard);
+    if (!evalRes.winner) {
+      setStatusMessage(
+        aiMoveIndex !== null
+          ? `AI responded on square #${aiMoveIndex + 1}. Your move as ${playerMark}.`
+          : `Your turn as ${playerMark}.`
+      );
       return;
     }
 
-    setBusy(true);
-    try {
-      const res = await apiFetch<{
-        ok: boolean;
-        board: CellVal[];
-        boardSize: number;
-        winTarget: number;
-        aiMoveIndex: number | null;
-        finished: boolean;
-        outcome?: 'win' | 'loss' | 'draw';
-        winLine?: number[] | null;
-        rewards?: { scoreDelta: number; xpEarned: number; coinsEarned: number };
-        player?: PlayerProfile;
-        newlyUnlocked?: string[];
-        completedChallenges?: string[];
-      }>(
-        '/api/games/tictactoe/move',
-        {
-          method: 'POST',
-          body: JSON.stringify({ sessionId, cellIndex: idx }),
-        },
-        { suppressSessionEvent: true }
-      );
-
-      setBoard(res.board);
-      if (!res.finished) {
-        setStatusMessage(
-          res.aiMoveIndex !== null
-            ? `AI responded on square #${res.aiMoveIndex + 1}. Your move as ${playerMark}.`
-            : `Your turn as ${playerMark}.`
-        );
-      } else {
-        setWinLine(res.winLine || null);
-        if (res.outcome === 'win') {
-          soundFx.playWin();
-          setOutcomeBanner(`Victory! ${matchWinTarget}-in-a-Row Completed`);
-          setSessionScore((s) => ({ ...s, wins: s.wins + 1 }));
-        } else if (res.outcome === 'draw') {
-          soundFx.playDraw();
-          setOutcomeBanner('Draw — Tactical Stalemate');
-          setSessionScore((s) => ({ ...s, draws: s.draws + 1 }));
-        } else {
-          soundFx.playLoss();
-          setOutcomeBanner(`Defeat — AI Completed ${matchWinTarget}-in-a-Row`);
-          setSessionScore((s) => ({ ...s, losses: s.losses + 1 }));
-        }
-        setStatusMessage('Round complete. Press Rematch to play again.');
-        if (res.rewards) setRewardBanner(res.rewards);
-        if (res.player) {
-          onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);
-        }
-      }
-    } catch {
-      setSessionId(`local_ttt_${Date.now().toString(36)}`);
-      executeLocalAiTurn();
-    } finally {
-      setBusy(false);
+    setWinLine(evalRes.line);
+    const outcome: 'win' | 'loss' | 'draw' =
+      evalRes.winner === 'draw' ? 'draw' : evalRes.winner === playerMark ? 'win' : 'loss';
+    if (outcome === 'win') {
+      soundFx.playWin();
+      setOutcomeBanner(`Victory! ${matchWinTarget}-in-a-Row Completed`);
+      setSessionScore((s) => ({ ...s, wins: s.wins + 1 }));
+    } else if (outcome === 'draw') {
+      soundFx.playDraw();
+      setOutcomeBanner('Draw — Tactical Stalemate');
+      setSessionScore((s) => ({ ...s, draws: s.draws + 1 }));
+    } else {
+      soundFx.playLoss();
+      setOutcomeBanner(`Defeat — AI Completed ${matchWinTarget}-in-a-Row`);
+      setSessionScore((s) => ({ ...s, losses: s.losses + 1 }));
     }
+    setStatusMessage('Round complete. Press Rematch to play again.');
+    const scoreDelta =
+      outcome === 'win'
+        ? (mm.difficulty === 'hard' ? 140 : mm.difficulty === 'medium' ? 100 : 70) + (matchWinTarget - 3) * 15
+        : outcome === 'draw'
+        ? 35
+        : 10;
+    const recorded = recordLocalInstantMatch(player, {
+      gameId: 'tictactoe',
+      mode: 'vs_ai',
+      difficulty: mm.difficulty,
+      outcome,
+      opponentLabel: `PLAYNOVA AI (${mm.difficulty})`,
+      scoreDelta,
+      durationSec: Math.max(3, Math.round((Date.now() - localStartedAt) / 1000)),
+      summary: `${matchBoardSize}×${matchBoardSize} (${matchWinTarget}-in-a-row) vs ${mm.difficulty} AI`,
+    });
+    setRewardBanner(recorded.rewards);
+    onProgressUpdated(recorded.player, recorded.newlyUnlocked, recorded.completedChallenges);
   };
 
-  // Responsive board container width & cell typography for 3x3 up to 15x15
   const gridContainerClass =
-    matchBoardSize <= 3
+    activeBoardSize <= 3
       ? 'max-w-xs gap-3'
-      : matchBoardSize <= 5
+      : activeBoardSize <= 5
       ? 'max-w-md gap-2'
-      : matchBoardSize <= 8
+      : activeBoardSize <= 8
       ? 'max-w-lg gap-1.5'
       : 'max-w-xl gap-1';
 
   const cellStyleClass =
-    matchBoardSize <= 3
+    activeBoardSize <= 3
       ? 'rounded-2xl text-5xl'
-      : matchBoardSize <= 5
+      : activeBoardSize <= 5
       ? 'rounded-xl text-3xl'
-      : matchBoardSize <= 8
+      : activeBoardSize <= 8
       ? 'rounded-lg text-lg sm:text-2xl'
-      : matchBoardSize <= 11
+      : activeBoardSize <= 11
       ? 'rounded-md text-xs sm:text-base'
       : 'rounded text-[10px] sm:text-xs';
 
@@ -379,342 +269,281 @@ export function TicTacToeGame({
             onClick={onBack}
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white cursor-pointer"
           >
-            <ArrowLeft className="h-3.5 w-3.5" /> Back to Hub
+            <ArrowLeft className="h-3.5 w-3.5" /> Back to Games
           </button>
-          <h1 className="mt-1 font-display text-2xl font-bold text-white sm:text-3xl">
-            Tic-Tac-Toe Arena
-          </h1>
+          <h1 className="mt-1 font-display text-2xl font-bold text-white sm:text-3xl">Tic-Tac-Toe Arena</h1>
         </div>
         <div className="flex flex-wrap items-center gap-4 font-mono text-xs tabular-nums text-slate-300">
           <span>Wins: {player.stats.byGame.tictactoe.wins}</span>
           <span>Draws: {player.stats.byGame.tictactoe.draws}</span>
           <span>Points: {player.stats.byGame.tictactoe.points}</span>
-          {onOpenMultiplayer && (
-            <button
-              type="button"
-              onClick={onOpenMultiplayer}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-3 py-1.5 font-sans text-xs font-semibold text-emerald-300 transition hover:bg-emerald-900/40 cursor-pointer"
-            >
-              <Users className="h-3.5 w-3.5" />
-              Play Online / Mixed Rooms
-            </button>
-          )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        {/* Left Control & Board Area */}
-        <div className="space-y-5 lg:col-span-7">
-          {phase === 'setup' ? (
-            <div className="rounded-2xl border border-slate-800 bg-[#10141F] p-6 space-y-6">
-              <div>
-                <h2 className="font-display text-xl font-bold text-white">Rules & Custom Match Setup</h2>
-                <ul className="mt-3 space-y-1.5 text-sm text-slate-300">
-                  {catalog.rules.map((r) => (
-                    <li key={r}>• {r}</li>
-                  ))}
-                </ul>
-              </div>
-
-              {/* Custom Win Target & Auto-Expanding Board Size */}
-              <div className="rounded-xl border border-white/[0.08] bg-[#07090F] p-4 space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-xs font-semibold text-white flex items-center gap-1.5">
-                      <Grid3X3 className="h-3.5 w-3.5 text-[#E11D48]" />
-                      Symbols in a Row to Win
-                    </p>
-                    <p className="text-[11px] text-slate-400">
-                      Pick 3, 4, 5, 6, 7, or enter any custom target up to {MAX_WIN_TARGET}. The grid expands automatically.
-                    </p>
-                  </div>
-                  <span className="rounded-lg border border-[#F59E0B]/40 bg-[#F59E0B]/10 px-2.5 py-1 font-mono text-xs font-bold text-[#F59E0B]">
-                    {previewConfig.boardSize}×{previewConfig.boardSize} Board · {previewConfig.winTarget} to Win
-                  </span>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  {PRESET_WIN_TARGETS.map((target) => (
-                    <button
-                      key={target}
-                      type="button"
-                      onClick={() => handleSelectWinTarget(target)}
-                      className={`rounded-lg border px-3.5 py-2 text-xs font-mono font-bold transition cursor-pointer ${
-                        winTargetInput === target
-                          ? 'border-[#E11D48] bg-[#E11D48]/20 text-white'
-                          : 'border-slate-700 bg-[#10141F] text-slate-300 hover:border-slate-500'
-                      }`}
-                    >
-                      {target} in a row
-                    </button>
-                  ))}
-
-                  <div className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#10141F] px-2 py-1">
-                    <span className="text-[11px] text-slate-400 pl-1">Custom:</span>
-                    <button
-                      type="button"
-                      aria-label="Decrease win target"
-                      onClick={() => handleSelectWinTarget(winTargetInput - 1)}
-                      disabled={winTargetInput <= MIN_WIN_TARGET}
-                      className="rounded p-1 text-slate-300 hover:bg-white/10 disabled:opacity-35 cursor-pointer"
-                    >
-                      <Minus className="h-3.5 w-3.5" />
-                    </button>
-                    <input
-                      type="number"
-                      min={MIN_WIN_TARGET}
-                      max={MAX_WIN_TARGET}
-                      value={winTargetInput}
-                      onChange={(e) => handleSelectWinTarget(Number(e.target.value))}
-                      aria-label="Custom win target in a row"
-                      className="w-12 rounded bg-[#07090F] py-1 text-center font-mono text-xs font-bold text-white focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      aria-label="Increase win target"
-                      onClick={() => handleSelectWinTarget(winTargetInput + 1)}
-                      disabled={winTargetInput >= MAX_WIN_TARGET}
-                      className="rounded p-1 text-slate-300 hover:bg-white/10 disabled:opacity-35 cursor-pointer"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.06] pt-3">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-300">Board Dimensions:</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setBoardSizeMode('auto');
-                        setCustomBoardSize(recommendedBoardSize(winTargetInput));
-                      }}
-                      className={`rounded-lg border px-3 py-1 text-xs font-semibold cursor-pointer ${
-                        boardSizeMode === 'auto'
-                          ? 'border-emerald-500 bg-emerald-950/40 text-emerald-300'
-                          : 'border-slate-700 bg-[#10141F] text-slate-400'
-                      }`}
-                    >
-                      Auto ({recommendedBoardSize(winTargetInput)}×{recommendedBoardSize(winTargetInput)})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setBoardSizeMode('custom');
-                        setCustomBoardSize(Math.max(winTargetInput, customBoardSize));
-                      }}
-                      className={`rounded-lg border px-3 py-1 text-xs font-semibold cursor-pointer ${
-                        boardSizeMode === 'custom'
-                          ? 'border-amber-500 bg-amber-950/40 text-amber-300'
-                          : 'border-slate-700 bg-[#10141F] text-slate-400'
-                      }`}
-                    >
-                      Custom Grid
-                    </button>
-                  </div>
-
-                  {boardSizeMode === 'custom' && (
-                    <label className="flex items-center gap-2 text-xs text-slate-300">
-                      Size:
-                      <input
-                        type="range"
-                        min={winTargetInput}
-                        max={MAX_BOARD_SIZE}
-                        value={Math.max(winTargetInput, customBoardSize)}
-                        onChange={(e) => setCustomBoardSize(Number(e.target.value))}
-                        className="accent-[#E11D48]"
-                      />
-                      <span className="font-mono font-bold text-white">
-                        {previewConfig.boardSize}×{previewConfig.boardSize}
-                      </span>
-                    </label>
-                  )}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <p className="text-xs font-semibold text-slate-300">Opponent Mode</p>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setMode('vs_ai')}
-                      className={`flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2.5 text-xs font-semibold cursor-pointer ${
-                        mode === 'vs_ai'
-                          ? 'border-rose-500 bg-rose-600/20 text-white'
-                          : 'border-slate-700 bg-[#07090F] text-slate-300'
-                      }`}
-                    >
-                      <Cpu className="h-3.5 w-3.5" /> vs AI
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setMode('local_2p')}
-                      className={`flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2.5 text-xs font-semibold cursor-pointer ${
-                        mode === 'local_2p'
-                          ? 'border-rose-500 bg-rose-600/20 text-white'
-                          : 'border-slate-700 bg-[#07090F] text-slate-300'
-                      }`}
-                    >
-                      <Users className="h-3.5 w-3.5" /> 2-Player Local
-                    </button>
-                  </div>
-                </div>
-
-                {mode === 'vs_ai' && (
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold text-slate-300">AI Difficulty</p>
-                    <div className="grid grid-cols-3 gap-2">
-                      {(['easy', 'medium', 'hard'] as DifficultyLevel[]).map((d) => (
-                        <button
-                          key={d}
-                          type="button"
-                          onClick={() => setDifficulty(d)}
-                          className={`rounded-xl border px-2 py-2.5 text-xs font-semibold capitalize cursor-pointer ${
-                            difficulty === d
-                              ? 'border-amber-500 bg-amber-600/20 text-white'
-                              : 'border-slate-700 bg-[#07090F] text-slate-300'
-                          }`}
-                        >
-                          {d}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {mode === 'vs_ai' && (
-                <div className="space-y-2">
-                  <p className="text-xs font-semibold text-slate-300">Choose Your Mark</p>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setPlayerMark('X')}
-                      className={`rounded-xl border px-4 py-2 text-xs font-semibold cursor-pointer ${
-                        playerMark === 'X'
-                          ? 'border-rose-500 bg-rose-600/20 text-white'
-                          : 'border-slate-700 bg-[#07090F] text-slate-300'
-                      }`}
-                    >
-                      Play as X (Moves First)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPlayerMark('O')}
-                      className={`rounded-xl border px-4 py-2 text-xs font-semibold cursor-pointer ${
-                        playerMark === 'O'
-                          ? 'border-amber-500 bg-amber-600/20 text-white'
-                          : 'border-slate-700 bg-[#07090F] text-slate-300'
-                      }`}
-                    >
-                      Play as O (Moves Second)
-                    </button>
-                  </div>
-                </div>
-              )}
-
+      <UniversalMatchBar
+        matchPhase={mm.matchPhase}
+        secondsLeft={mm.secondsLeft}
+        difficulty={mm.difficulty}
+        onChangeDifficulty={(d) => {
+          mm.setDifficulty(d);
+          startLocalMatch('vs_ai', playerMark);
+        }}
+        liveMatch={mm.liveMatch}
+        mySeat={mm.mySeat}
+        opponentSeat={mm.opponentSeat}
+        onlineCount={mm.onlineCount}
+        onSkipToAi={mm.skipToAi}
+        onSearchHuman={mm.searchForHuman}
+        onLeaveHuman={mm.leaveHumanMatch}
+        onRematchHuman={mm.rematchHuman}
+        onSendChat={mm.sendChat}
+        extraControls={
+          !isHuman ? (
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                disabled={busy}
-                onClick={() => void startMatch()}
-                className="w-full rounded-xl bg-rose-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-rose-500 cursor-pointer"
+                onClick={() => setShowRulesDrawer((s) => !s)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-white/[0.1] bg-[#060811] px-3 py-2 text-xs font-semibold text-slate-200 hover:text-white whitespace-nowrap cursor-pointer"
               >
-                {busy
-                  ? 'Preparing Board...'
-                  : `Start ${previewConfig.boardSize}×${previewConfig.boardSize} Match (${previewConfig.winTarget} in a row)`}
+                <Grid3X3 className="h-3.5 w-3.5 text-[#38BDF8]" />
+                {matchBoardSize}×{matchBoardSize} Rules
+              </button>
+              <button
+                type="button"
+                onClick={() => startLocalMatch(localMode, playerMark)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-white/[0.1] bg-[#060811] px-3 py-2 text-xs font-semibold text-slate-200 hover:text-white whitespace-nowrap cursor-pointer"
+              >
+                <RotateCcw className="h-3.5 w-3.5" /> Reset
               </button>
             </div>
-          ) : (
-            <div className="rounded-2xl border border-slate-800 bg-[#10141F] p-6 space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <span className="inline-block rounded border border-[#F59E0B]/40 bg-[#F59E0B]/10 px-2 py-0.5 font-mono text-[11px] font-bold text-[#F59E0B]">
-                    {matchBoardSize}×{matchBoardSize} GRID · {matchWinTarget} IN A ROW TO WIN
-                  </span>
-                  <p className="mt-1.5 text-sm font-medium text-slate-200">{statusMessage}</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void startMatch()}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#07090F] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-500 cursor-pointer"
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" /> {outcomeBanner ? 'Rematch' : 'Restart'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPhase('setup')}
-                    className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400 hover:text-white cursor-pointer"
-                  >
-                    Change Rules
-                  </button>
-                </div>
-              </div>
+          ) : undefined
+        }
+      />
 
-              {/* Dynamic N×N Interactive Board */}
-              <div
-                style={{ gridTemplateColumns: `repeat(${matchBoardSize}, minmax(0, 1fr))` }}
-                className={`mx-auto grid w-full ${gridContainerClass}`}
+      {!isHuman && showRulesDrawer && (
+        <div className="rounded-2xl border border-white/[0.1] bg-[#0E1324] p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-xs font-semibold text-white">Custom Grid & Win Target (3×3 up to 15×15)</p>
+              <p className="text-[11px] text-slate-400">
+                Choose symbols in a row or switch between AI and Local 2P.
+              </p>
+            </div>
+            <span className="font-mono text-xs font-bold text-[#F97316]">
+              {previewConfig.boardSize}×{previewConfig.boardSize} · {previewConfig.winTarget} in a row
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {PRESET_WIN_TARGETS.map((target) => (
+              <button
+                key={target}
+                type="button"
+                onClick={() => handleSelectWinTarget(target)}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-mono font-bold cursor-pointer ${
+                  winTargetInput === target
+                    ? 'border-[#E11D48] bg-[#E11D48]/20 text-white'
+                    : 'border-slate-700 bg-[#060811] text-slate-300'
+                }`}
               >
-                {board.map((val, idx) => {
-                  const isWinCell = winLine?.includes(idx);
-                  return (
-                    <button
-                      key={idx}
-                      type="button"
-                      disabled={busy || Boolean(outcomeBanner) || val !== null}
-                      onClick={() => void handleCellClick(idx)}
-                      className={`aspect-square border font-display font-bold flex items-center justify-center transition ${cellStyleClass} ${
-                        isWinCell
-                          ? 'border-emerald-400 bg-emerald-950/50'
-                          : 'border-slate-700 bg-[#07090F] hover:border-slate-500 disabled:hover:border-slate-700 cursor-pointer disabled:cursor-default'
-                      }`}
-                      aria-label={`Square ${idx + 1}: ${val || 'empty'}`}
-                    >
-                      {val && (
-                        <motion.span
-                          initial={{ scale: 0.5, opacity: 0 }}
-                          animate={{ scale: 1, opacity: 1 }}
-                          transition={{ duration: 0.16 }}
-                          className={val === 'X' ? 'text-rose-500' : 'text-amber-400'}
-                        >
-                          {val}
-                        </motion.span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+                {target} in a row
+              </button>
+            ))}
+            <div className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#060811] px-2 py-1">
+              <button
+                type="button"
+                onClick={() => handleSelectWinTarget(winTargetInput - 1)}
+                disabled={winTargetInput <= MIN_WIN_TARGET}
+                className="rounded p-1 text-slate-300 disabled:opacity-35 cursor-pointer"
+              >
+                <Minus className="h-3.5 w-3.5" />
+              </button>
+              <span className="w-6 text-center font-mono text-xs font-bold text-white">{winTargetInput}</span>
+              <button
+                type="button"
+                onClick={() => handleSelectWinTarget(winTargetInput + 1)}
+                disabled={winTargetInput >= MAX_WIN_TARGET}
+                className="rounded p-1 text-slate-300 disabled:opacity-35 cursor-pointer"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
 
-              {outcomeBanner && (
-                <div className="rounded-xl border border-slate-700 bg-[#07090F] p-4 flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <p className="font-display text-lg font-bold text-white">{outcomeBanner}</p>
-                    {rewardBanner && (
-                      <p className="mt-0.5 font-mono text-xs text-emerald-400">
-                        +{rewardBanner.scoreDelta} Pts · +{rewardBanner.xpEarned} XP · +{rewardBanner.coinsEarned} Coins
-                      </p>
-                    )}
-                  </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.06] pt-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setLocalMode('vs_ai')}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold cursor-pointer ${
+                  localMode === 'vs_ai' ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white' : 'border-slate-700 text-slate-400'
+                }`}
+              >
+                <Cpu className="h-3.5 w-3.5" /> vs AI
+              </button>
+              <button
+                type="button"
+                onClick={() => setLocalMode('local_2p')}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold cursor-pointer ${
+                  localMode === 'local_2p' ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white' : 'border-slate-700 text-slate-400'
+                }`}
+              >
+                <Users className="h-3.5 w-3.5" /> Local 2P
+              </button>
+              {localMode === 'vs_ai' && (
+                <>
                   <button
                     type="button"
-                    onClick={() => void startMatch()}
-                    className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-500 cursor-pointer"
+                    onClick={() => setPlayerMark('X')}
+                    className={`rounded-lg border px-3 py-1.5 text-xs font-semibold cursor-pointer ${
+                      playerMark === 'X' ? 'border-rose-500 bg-rose-500/20 text-white' : 'border-slate-700 text-slate-400'
+                    }`}
                   >
-                    Play Rematch
+                    Play X
                   </button>
-                </div>
+                  <button
+                    type="button"
+                    onClick={() => setPlayerMark('O')}
+                    className={`rounded-lg border px-3 py-1.5 text-xs font-semibold cursor-pointer ${
+                      playerMark === 'O' ? 'border-amber-500 bg-amber-500/20 text-white' : 'border-slate-700 text-slate-400'
+                    }`}
+                  >
+                    Play O
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setBoardSizeMode((m) => (m === 'auto' ? 'custom' : 'auto'));
+                  setCustomBoardSize(recommendedBoardSize(winTargetInput));
+                }}
+                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 cursor-pointer"
+              >
+                Grid: {boardSizeMode === 'auto' ? 'Auto' : `${customBoardSize}×${customBoardSize}`}
+              </button>
+              {boardSizeMode === 'custom' && (
+                <input
+                  type="range"
+                  min={winTargetInput}
+                  max={MAX_BOARD_SIZE}
+                  value={Math.max(winTargetInput, customBoardSize)}
+                  onChange={(e) => setCustomBoardSize(Number(e.target.value))}
+                  className="accent-[#E11D48]"
+                />
               )}
             </div>
-          )}
+            <button
+              type="button"
+              onClick={() => startLocalMatch(localMode, playerMark)}
+              className="rounded-xl bg-[#8B5CF6] px-4 py-2 text-xs font-bold text-white cursor-pointer"
+            >
+              Apply & Start Board
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        <div className="space-y-5 lg:col-span-7">
+          <div className="rounded-2xl border border-slate-800 bg-[#10141F] p-6 space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <span className="font-mono text-[11px] font-bold text-[#F59E0B]">
+                  {activeBoardSize}×{activeBoardSize} GRID · {activeWinTarget} IN A ROW TO WIN
+                </span>
+                <p className="mt-1 text-sm font-medium text-slate-200">
+                  {isHuman && tttServer
+                    ? tttServer.winnerTeam
+                      ? mm.liveMatch?.winnerSummary || 'Match complete'
+                      : tttServer.activeSeatIndex === mm.mySeatIndex
+                      ? `Your turn (${myTeam}) — place on the grid`
+                      : `Waiting for ${mm.opponentSeat?.username || 'Opponent'} (${tttServer.currentTeam})...`
+                    : statusMessage}
+                </p>
+              </div>
+              {!isHuman && (
+                <button
+                  type="button"
+                  onClick={() => startLocalMatch(localMode, playerMark)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#07090F] px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-500 cursor-pointer"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" /> {outcomeBanner ? 'Rematch' : 'Restart'}
+                </button>
+              )}
+            </div>
+
+            <div
+              style={{ gridTemplateColumns: `repeat(${activeBoardSize}, minmax(0, 1fr))` }}
+              className={`mx-auto grid w-full ${gridContainerClass}`}
+            >
+              {activeBoard.map((val, idx) => {
+                const isWinCell = activeWinLine?.includes(idx);
+                const disabled =
+                  mm.matchPhase === 'searching' ||
+                  isFinished ||
+                  val !== null ||
+                  (isHuman && tttServer?.activeSeatIndex !== mm.mySeatIndex);
+                return (
+                  <button
+                    key={idx}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => void handleCellClick(idx)}
+                    className={`aspect-square border font-display font-bold flex items-center justify-center transition ${cellStyleClass} ${
+                      isWinCell
+                        ? 'border-emerald-400 bg-emerald-950/50'
+                        : 'border-slate-700 bg-[#07090F] hover:border-slate-500 disabled:hover:border-slate-700 cursor-pointer disabled:cursor-default'
+                    }`}
+                    aria-label={`Square ${idx + 1}: ${val || 'empty'}`}
+                  >
+                    {val && (
+                      <motion.span
+                        initial={{ scale: 0.5, opacity: 0 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        transition={{ duration: 0.16 }}
+                        className={val === 'X' ? 'text-rose-500' : 'text-amber-400'}
+                      >
+                        {val}
+                      </motion.span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {isFinished && (
+              <div className="rounded-xl border border-slate-700 bg-[#07090F] p-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="font-display text-lg font-bold text-white">
+                    {isHuman ? mm.liveMatch?.winnerSummary : outcomeBanner}
+                  </p>
+                  {rewardBanner && (
+                    <p className="mt-0.5 font-mono text-xs text-emerald-400">
+                      +{rewardBanner.scoreDelta} Pts · +{rewardBanner.xpEarned} XP · +{rewardBanner.coinsEarned} Coins
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={isHuman ? mm.rematchHuman : () => startLocalMatch(localMode, playerMark)}
+                  className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-500 cursor-pointer"
+                >
+                  Play Rematch
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Right Session Scoreboard & Match History */}
         <div className="space-y-5 lg:col-span-5">
-          <div className="rounded-2xl border border-slate-800 bg-[#10141F] p-5">
-            <h3 className="font-display text-lg font-bold text-white">Session Scoreboard</h3>
+          <div className="rounded-2xl border border-slate-800 bg-[#10141F] p-5 space-y-3">
+            <h3 className="font-display text-lg font-bold text-white">Rules & Session Score</h3>
+            <ul className="space-y-1.5 text-xs text-slate-300">
+              {catalog.rules.map((r) => (
+                <li key={r}>• {r}</li>
+              ))}
+            </ul>
             <div className="mt-3 grid grid-cols-3 gap-3 text-center font-mono">
               <div className="rounded-xl border border-slate-800 bg-[#07090F] p-3">
                 <p className="text-[11px] text-slate-400">Wins</p>
@@ -741,7 +570,7 @@ export function TicTacToeGame({
                 Complete your first match to log history and earn XP & Coins.
               </p>
             ) : (
-              <div className="mt-3 space-y-2 max-h-[300px] overflow-y-auto pr-1">
+              <div className="mt-3 space-y-2 max-h-[260px] overflow-y-auto pr-1">
                 {tttMatches.slice(0, 8).map((m) => (
                   <div
                     key={m.id}

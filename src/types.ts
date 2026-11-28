@@ -4,15 +4,25 @@ export type GameId =
   | 'guess_number'
   | 'connect_four'
   | 'chess'
+  | 'checkers'
+  | 'ludo'
   | 'memory_match'
   | 'word_battle'
+  | 'word_scramble'
+  | 'hangman'
   | 'trivia_challenge'
   | 'sudoku'
   | 'quick_math'
   | 'reaction_test'
-  | 'pattern_recognition';
+  | 'pattern_recognition'
+  | 'snake'
+  | 'minesweeper'
+  | 'battleship'
+  | 'dots_and_boxes'
+  | 'reversi'
+  | 'connect_five';
 
-export type MultiplayerGameId = 'tictactoe' | 'rps' | 'guess_number' | 'connect_four' | 'chess';
+export type MultiplayerGameId = GameId;
 
 export type GameCategory =
   | 'Strategy Games'
@@ -21,7 +31,8 @@ export type GameCategory =
   | 'Quick Challenges'
   | 'Competitive Games'
   | 'AI Games'
-  | 'Party Games';
+  | 'Party Games'
+  | 'Arcade & Classic';
 
 export type DifficultyLevel = 'easy' | 'medium' | 'hard';
 
@@ -100,8 +111,8 @@ export interface OnlinePlayerSummary {
   profilePictureUrl: string | null;
   activeFrame: string;
   level: number;
-  status: 'lobby' | 'queued' | 'in_room' | 'in_match';
-  roomId: string | null;
+  status: 'lobby' | 'queued' | 'in_match';
+  matchId: string | null;
 }
 
 export interface RoomSeat {
@@ -112,7 +123,7 @@ export interface RoomSeat {
   profilePictureUrl: string | null;
   activeFrame: string;
   aiDifficulty?: DifficultyLevel;
-  team?: 'X' | 'O' | 'R' | 'Y' | 'W' | 'B';
+  team?: 'X' | 'O' | 'R' | 'Y' | 'W' | 'B' | 'A';
   connectionStatus: 'online' | 'reconnecting' | 'bot';
   score: number;
   hasPicked?: boolean;
@@ -122,6 +133,10 @@ export interface RoomSeat {
   lastClue?: 'higher' | 'lower' | 'correct' | null;
   lastProximity?: string | null;
   crackedAtMs?: number | null;
+  duelProgress?: number;
+  duelMaxProgress?: number;
+  duelFinished?: boolean;
+  duelSummary?: string | null;
 }
 
 export interface RoomChatMessage {
@@ -135,28 +150,19 @@ export interface RoomChatMessage {
 
 export interface PublicRoomSummary {
   id: string;
-  code: string;
   gameId: MultiplayerGameId;
   title: string;
   mode: 'vs_human' | 'mixed';
-  isPrivate: boolean;
-  status: 'waiting' | 'active' | 'finished';
+  status: 'active' | 'finished';
   maxSeats: number;
   humanCount: number;
-  aiCount: number;
-  hostUsername: string;
-  tttBoardSize?: number;
-  tttWinTarget?: number;
-  rpsTargetWins?: number;
 }
 
 export interface RoomState {
   id: string;
-  code: string;
   gameId: MultiplayerGameId;
   title: string;
   mode: 'vs_human' | 'mixed';
-  isPrivate: boolean;
   hostPlayerId: string;
   status: 'waiting' | 'active' | 'finished';
   maxSeats: number;
@@ -203,7 +209,18 @@ export interface RoomState {
     }>;
   };
   connectFourState?: {
-    board: Array<'R' | 'Y' | null>; // 7 cols x 6 rows = 42 cells
+    board: Array<'R' | 'Y' | null>;
+    currentTeam: 'R' | 'Y';
+    activeSeatIndex: number;
+    winnerTeam: 'R' | 'Y' | 'draw' | null;
+    winLine: number[] | null;
+    lastCol: number | null;
+  };
+  connectFiveState?: {
+    cols: number;
+    rows: number;
+    winTarget: number;
+    board: Array<'R' | 'Y' | null>;
     currentTeam: 'R' | 'Y';
     activeSeatIndex: number;
     winnerTeam: 'R' | 'Y' | 'draw' | null;
@@ -211,10 +228,10 @@ export interface RoomState {
     lastCol: number | null;
   };
   chessState?: {
-    board: Array<string | null>; // 64 squares: 'wP','bK' etc.
+    board: Array<string | null>;
     turn: 'w' | 'b';
     activeSeatIndex: number;
-    castling: string; // e.g. 'KQkq'
+    castling: string;
     enPassant: number | null;
     halfMoveClock: number;
     moveHistory: string[];
@@ -224,12 +241,71 @@ export interface RoomState {
     lastFrom: number | null;
     lastTo: number | null;
   };
+  checkersState?: {
+    board: Array<'r' | 'R' | 'b' | 'B' | null>;
+    turn: 'r' | 'b';
+    activeSeatIndex: number;
+    mustContinueFrom: number | null;
+    winnerTeam: 'r' | 'b' | 'draw' | null;
+    lastFrom: number | null;
+    lastTo: number | null;
+    statusText: string;
+  };
+  reversiState?: {
+    board: Array<'B' | 'W' | null>;
+    turn: 'B' | 'W';
+    activeSeatIndex: number;
+    winnerTeam: 'B' | 'W' | 'draw' | null;
+    lastMove: number | null;
+    blackCount: number;
+    whiteCount: number;
+    statusText: string;
+  };
+  dotsState?: {
+    rows: number;
+    cols: number;
+    hEdges: Array<'A' | 'B' | null>;
+    vEdges: Array<'A' | 'B' | null>;
+    boxes: Array<'A' | 'B' | null>;
+    turn: 'A' | 'B';
+    activeSeatIndex: number;
+    scoreA: number;
+    scoreB: number;
+    winnerTeam: 'A' | 'B' | 'draw' | null;
+    statusText: string;
+  };
+  battleshipState?: {
+    turnSeatIndex: number;
+    phase: 'placing' | 'battle' | 'finished';
+    winnerSeatIndex: number | null;
+    readyBySeat: Record<number, boolean>;
+    shotsOnSeat: Record<number, Array<'unknown' | 'miss' | 'hit' | 'sunk'>>;
+    ownShipBoards?: Record<number, number[]>;
+    sunkShipsBySeat: Record<number, string[]>;
+    statusText: string;
+  };
+  ludoState?: {
+    playersCount: number;
+    tokens: number[][]; // per seat 0..3: 4 positions (-1 yard, 0..51 outer, 52..57 home col, 58 finished)
+    turnSeatIndex: number;
+    diceValue: number | null;
+    phase: 'roll' | 'move' | 'finished';
+    winnerSeatIndex: number | null;
+    statusText: string;
+  };
+  duelState?: {
+    seed: number;
+    durationSec: number;
+    startedAt: number;
+    endsAt: number;
+    winnerSeatIndex: number | null;
+    statusText: string;
+  };
   winnerSummary: string | null;
 }
 
 export interface RoomInviteEvent {
-  roomId: string;
-  roomCode: string;
+  matchId: string;
   gameId: MultiplayerGameId;
   fromPlayerId: string;
   fromUsername: string;

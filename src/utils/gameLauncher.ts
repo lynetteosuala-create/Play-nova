@@ -7,7 +7,6 @@ export interface ParsedRouteResult {
   matched: boolean;
   gameId: GameId | null;
   invalidPath: string | null;
-  roomCode: string | null;
   multiplayerGame: MultiplayerGameId | null;
 }
 
@@ -23,13 +22,24 @@ const GAME_SLUG_ALIASES: Record<string, GameId> = {
   connect_four: 'connect_four',
   'connect-four': 'connect_four',
   connect4: 'connect_four',
+  connect_five: 'connect_five',
+  'connect-five': 'connect_five',
+  connect5: 'connect_five',
+  'four-in-a-row': 'connect_five',
   chess: 'chess',
+  checkers: 'checkers',
+  draughts: 'checkers',
+  ludo: 'ludo',
   memory: 'memory_match',
   memory_match: 'memory_match',
   'memory-match': 'memory_match',
   word: 'word_battle',
   word_battle: 'word_battle',
   'word-battle': 'word_battle',
+  word_scramble: 'word_scramble',
+  'word-scramble': 'word_scramble',
+  scramble: 'word_scramble',
+  hangman: 'hangman',
   trivia: 'trivia_challenge',
   trivia_challenge: 'trivia_challenge',
   'trivia-challenge': 'trivia_challenge',
@@ -37,12 +47,23 @@ const GAME_SLUG_ALIASES: Record<string, GameId> = {
   quick_math: 'quick_math',
   'quick-math': 'quick_math',
   math: 'quick_math',
+  'math-challenge': 'quick_math',
   reaction: 'reaction_test',
   reaction_test: 'reaction_test',
   'reaction-test': 'reaction_test',
+  'reaction-speed': 'reaction_test',
   pattern: 'pattern_recognition',
   pattern_recognition: 'pattern_recognition',
   'pattern-recognition': 'pattern_recognition',
+  snake: 'snake',
+  minesweeper: 'minesweeper',
+  mines: 'minesweeper',
+  battleship: 'battleship',
+  dots_and_boxes: 'dots_and_boxes',
+  'dots-and-boxes': 'dots_and_boxes',
+  dots: 'dots_and_boxes',
+  reversi: 'reversi',
+  othello: 'reversi',
 };
 
 export function resolveGameIdFromSlug(rawSlug: string): GameId | null {
@@ -66,8 +87,6 @@ export function parseLocationToRoute(
 ): ParsedRouteResult {
   const cleanPath = pathname.toLowerCase().replace(/\/+$/, '') || '/';
   const params = new URLSearchParams(search);
-  const rawRoom = params.get('room');
-  const roomCode = rawRoom ? rawRoom.trim().toUpperCase() : null;
   const rawMpGame = params.get('game');
   const parsedMpGame = rawMpGame ? resolveGameIdFromSlug(rawMpGame) : null;
   const multiplayerGame =
@@ -76,31 +95,31 @@ export function parseLocationToRoute(
       : null;
 
   if (cleanPath === '/' || cleanPath === '') {
-    return { view: 'home', matched: true, gameId: null, invalidPath: null, roomCode, multiplayerGame };
+    return { view: 'home', matched: true, gameId: null, invalidPath: null, multiplayerGame };
   }
   if (cleanPath === '/lobby') {
-    return { view: 'lobby', matched: true, gameId: null, invalidPath: null, roomCode, multiplayerGame };
+    return { view: 'lobby', matched: true, gameId: null, invalidPath: null, multiplayerGame };
   }
   if (cleanPath === '/multiplayer') {
-    return { view: 'multiplayer', matched: true, gameId: null, invalidPath: null, roomCode, multiplayerGame };
+    return { view: 'multiplayer', matched: true, gameId: null, invalidPath: null, multiplayerGame };
   }
   if (cleanPath === '/tournaments') {
-    return { view: 'tournaments', matched: true, gameId: null, invalidPath: null, roomCode, multiplayerGame };
+    return { view: 'tournaments', matched: true, gameId: null, invalidPath: null, multiplayerGame };
   }
   if (cleanPath === '/games') {
-    return { view: 'games', matched: true, gameId: null, invalidPath: null, roomCode, multiplayerGame };
+    return { view: 'games', matched: true, gameId: null, invalidPath: null, multiplayerGame };
   }
   if (cleanPath === '/leaderboard') {
-    return { view: 'leaderboard', matched: true, gameId: null, invalidPath: null, roomCode, multiplayerGame };
+    return { view: 'leaderboard', matched: true, gameId: null, invalidPath: null, multiplayerGame };
   }
   if (cleanPath === '/link-preview') {
-    return { view: 'link_preview', matched: true, gameId: null, invalidPath: null, roomCode, multiplayerGame };
+    return { view: 'link_preview', matched: true, gameId: null, invalidPath: null, multiplayerGame };
   }
   if (cleanPath === '/profile') {
-    return { view: 'profile', matched: true, gameId: null, invalidPath: null, roomCode, multiplayerGame };
+    return { view: 'profile', matched: true, gameId: null, invalidPath: null, multiplayerGame };
   }
   if (cleanPath === '/admin') {
-    return { view: 'admin', matched: true, gameId: null, invalidPath: null, roomCode, multiplayerGame };
+    return { view: 'admin', matched: true, gameId: null, invalidPath: null, multiplayerGame };
   }
 
   if (cleanPath.startsWith('/games/')) {
@@ -112,7 +131,6 @@ export function parseLocationToRoute(
         matched: true,
         gameId: resolvedGame,
         invalidPath: null,
-        roomCode,
         multiplayerGame,
       };
     }
@@ -121,13 +139,12 @@ export function parseLocationToRoute(
       matched: false,
       gameId: null,
       invalidPath: pathname,
-      roomCode,
       multiplayerGame,
     };
   }
 
   if (cleanPath.startsWith('/share/')) {
-    return { view: 'link_preview', matched: true, gameId: null, invalidPath: null, roomCode, multiplayerGame };
+    return { view: 'link_preview', matched: true, gameId: null, invalidPath: null, multiplayerGame };
   }
 
   return {
@@ -135,7 +152,6 @@ export function parseLocationToRoute(
     matched: false,
     gameId: null,
     invalidPath: pathname,
-    roomCode,
     multiplayerGame,
   };
 }

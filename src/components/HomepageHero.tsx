@@ -1,20 +1,22 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   ArrowRight,
   Calendar,
+  Clock,
   Coins,
   Cpu,
   Flame,
   Gamepad2,
   Globe,
   Play,
+  Search,
   Sparkles,
   Trophy,
   Users,
 } from 'lucide-react';
 import { GAME_ASSETS } from '../assets/gameAssets.ts';
 import { DEFAULT_CHALLENGES, GAME_CATALOG, GAME_CATEGORIES } from '../game/catalog.ts';
-import type { AppView, GameCategory, GameId, LeaderboardEntry, TournamentItem } from '../types.ts';
+import type { AppView, GameCategory, GameId, LeaderboardEntry, MatchRecord, TournamentItem } from '../types.ts';
 
 export function getGameArtwork(id: GameId): string {
   switch (id) {
@@ -25,12 +27,31 @@ export function getGameArtwork(id: GameId): string {
     case 'guess_number':
       return GAME_ASSETS.guessNumberArt;
     case 'connect_four':
+    case 'connect_five':
     case 'chess':
       return GAME_ASSETS.strategyArt;
-    case 'sudoku':
+    case 'checkers':
+    case 'reversi':
+      return GAME_ASSETS.checkersReversiArt;
+    case 'battleship':
+    case 'dots_and_boxes':
+      return GAME_ASSETS.battleshipArt;
+    case 'ludo':
+      return GAME_ASSETS.ludoPartyArt;
+    case 'snake':
+    case 'minesweeper':
+      return GAME_ASSETS.snakeMinesArt;
     case 'word_battle':
+    case 'word_scramble':
+    case 'hangman':
+      return GAME_ASSETS.wordHangmanArt;
+    case 'sudoku':
     case 'pattern_recognition':
       return GAME_ASSETS.brainArt;
+    case 'memory_match':
+    case 'trivia_challenge':
+    case 'quick_math':
+    case 'reaction_test':
     default:
       return GAME_ASSETS.arcadeArt;
   }
@@ -45,8 +66,9 @@ interface HomepageHeroProps {
   };
   topLeaders: LeaderboardEntry[];
   tournaments: TournamentItem[];
+  recentMatches?: MatchRecord[];
+  recentGameIds?: GameId[];
   onPlayNow: (desiredView?: AppView) => void;
-  onOpenMultiplayer: (gameId?: GameId) => void;
   onNavigatePublic: (view: 'games' | 'tournaments' | 'leaderboard' | 'link_preview') => void;
 }
 
@@ -54,19 +76,58 @@ export function HomepageHero({
   publicStats,
   topLeaders,
   tournaments,
+  recentMatches = [],
+  recentGameIds = [],
   onPlayNow,
-  onOpenMultiplayer,
   onNavigatePublic,
 }: HomepageHeroProps) {
   const [selectedCategory, setSelectedCategory] = useState<'All' | GameCategory>('All');
+  const [searchQuery, setSearchQuery] = useState('');
 
-  const filteredGames =
-    selectedCategory === 'All'
-      ? GAME_CATALOG
-      : GAME_CATALOG.filter((g) => g.categories.includes(selectedCategory));
+  const filteredGames = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return GAME_CATALOG.filter((g) => {
+      const catOk = selectedCategory === 'All' || g.categories.includes(selectedCategory);
+      if (!catOk) return false;
+      if (!q) return true;
+      return (
+        g.name.toLowerCase().includes(q) ||
+        g.tagline.toLowerCase().includes(q) ||
+        g.description.toLowerCase().includes(q) ||
+        g.categories.some((c) => c.toLowerCase().includes(q))
+      );
+    });
+  }, [selectedCategory, searchQuery]);
 
-  const multiplayerGames = GAME_CATALOG.filter((g) => g.supportsMultiplayer);
-  const recentlyAdded = GAME_CATALOG.filter((g) => g.recentlyAdded).slice(0, 6);
+  const popularGames = useMemo(
+    () => GAME_CATALOG.filter((g) => g.popularChallenge).slice(0, 6),
+    []
+  );
+  const recentlyAdded = useMemo(
+    () => GAME_CATALOG.filter((g) => g.recentlyAdded).slice(0, 6),
+    []
+  );
+  const recentlyPlayedGames = useMemo(() => {
+    const seen = new Set<GameId>();
+    const list: typeof GAME_CATALOG = [];
+    for (const gid of recentGameIds) {
+      if (seen.has(gid)) continue;
+      const item = GAME_CATALOG.find((g) => g.id === gid);
+      if (item) {
+        seen.add(gid);
+        list.push(item);
+      }
+    }
+    for (const m of recentMatches) {
+      if (seen.has(m.gameId)) continue;
+      const item = GAME_CATALOG.find((g) => g.id === m.gameId);
+      if (item) {
+        seen.add(m.gameId);
+        list.push(item);
+      }
+    }
+    return list.slice(0, 4);
+  }, [recentGameIds, recentMatches]);
 
   return (
     <div className="space-y-14">
@@ -103,14 +164,14 @@ export function HomepageHero({
             </h1>
 
             <p className="max-w-xl text-base leading-relaxed text-slate-300">
-              Twelve skill-based strategy, puzzle, and arcade arenas ready to play in seconds. Click Play Now for instant guest access—no username, email, or registration required—to battle adaptive AI, chat in real-time multiplayer rooms, win Virtual Coins, and climb global leaderboards.
+              {GAME_CATALOG.length} skill-based strategy, word, puzzle, and classic arcade games ready to play in one click. Launch any title for instant auto-matchmaking—pair live with online rivals or battle intelligent adaptive AI with zero waiting or registration.
             </p>
 
             <div className="flex flex-wrap items-center gap-4 pt-1">
               <button
                 type="button"
                 onClick={() => onPlayNow('lobby')}
-                className="inline-flex items-center gap-2.5 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-[#6366F1] px-8 py-3.5 text-base font-bold text-white shadow-[0_10px_32px_rgba(139,92,246,0.4)] transition hover:brightness-110 cursor-pointer"
+                className="inline-flex items-center gap-2.5 rounded-xl bg-gradient-to-r from-[#8B5CF6] to-[#6366F1] px-8 py-3.5 text-base font-bold text-white shadow-[0_10px_32px_rgba(139,92,246,0.4)] transition hover:brightness-110 whitespace-nowrap cursor-pointer"
               >
                 <Play className="h-5 w-5 fill-current" />
                 PLAY NOW
@@ -118,15 +179,15 @@ export function HomepageHero({
               <button
                 type="button"
                 onClick={() => onNavigatePublic('games')}
-                className="inline-flex items-center gap-2 rounded-xl border border-[#38BDF8]/40 bg-[#0B0F1E]/85 px-6 py-3.5 text-sm font-bold text-white transition hover:border-[#38BDF8] hover:bg-[#111833] cursor-pointer"
+                className="inline-flex items-center gap-2 rounded-xl border border-[#38BDF8]/40 bg-[#0B0F1E]/85 px-6 py-3.5 text-sm font-bold text-white transition hover:border-[#38BDF8] hover:bg-[#111833] whitespace-nowrap cursor-pointer"
               >
                 <Gamepad2 className="h-4 w-4 text-[#38BDF8]" />
-                EXPLORE GAMES
+                EXPLORE {GAME_CATALOG.length} GAMES
               </button>
               <button
                 type="button"
                 onClick={() => onNavigatePublic('tournaments')}
-                className="inline-flex items-center gap-2 rounded-xl border border-white/[0.15] bg-[#0B0F1E]/80 px-5 py-3.5 text-sm font-semibold text-slate-200 transition hover:border-white/35 hover:text-white cursor-pointer"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/[0.15] bg-[#0B0F1E]/80 px-5 py-3.5 text-sm font-semibold text-slate-200 transition hover:border-white/35 hover:text-white whitespace-nowrap cursor-pointer"
               >
                 <Trophy className="h-4 w-4 text-[#F97316]" />
                 Tournaments
@@ -136,9 +197,9 @@ export function HomepageHero({
 
           <div className="lg:col-span-5 grid grid-cols-2 gap-3.5">
             {[
-              { label: 'Online Players', val: publicStats.onlinePlayers, sub: 'Live WebSocket arena', icon: Users, accent: 'text-[#38BDF8]' },
-              { label: 'Active Rooms', val: publicStats.activeRooms, sub: 'Public & private lobbies', icon: Globe, accent: 'text-[#8B5CF6]' },
-              { label: 'Playable Games', val: GAME_CATALOG.length, sub: 'Strategy, Brain & Quick', icon: Gamepad2, accent: 'text-[#F97316]' },
+              { label: 'Online Players', val: publicStats.onlinePlayers, sub: 'Auto-matchmaking live', icon: Users, accent: 'text-[#38BDF8]' },
+              { label: 'Live Matches', val: publicStats.activeRooms, sub: 'Human 1v1 & AI duels', icon: Globe, accent: 'text-[#8B5CF6]' },
+              { label: 'Playable Games', val: GAME_CATALOG.length, sub: 'Strategy, Brain & Arcade', icon: Gamepad2, accent: 'text-[#F97316]' },
               { label: 'Matches Logged', val: publicStats.totalMatches, sub: 'Verified results', icon: Coins, accent: 'text-emerald-400' },
             ].map((stat) => (
               <div
@@ -159,20 +220,59 @@ export function HomepageHero({
         </div>
       </section>
 
-      {/* Featured Game Previews with 7 Category Filters */}
+      {/* Recently Played Quick Resume Strip (when player has played games) */}
+      {recentlyPlayedGames.length > 0 && (
+        <section className="space-y-3">
+          <div className="flex items-center gap-2">
+            <Clock className="h-4 w-4 text-[#38BDF8]" />
+            <h2 className="font-display text-lg font-bold text-white">Recently Played</h2>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {recentlyPlayedGames.map((g) => (
+              <button
+                key={g.id}
+                type="button"
+                onClick={() => onPlayNow(g.id)}
+                className="flex items-center gap-3 rounded-2xl border border-[#38BDF8]/25 bg-[#0E1324] p-3 text-left transition hover:border-[#38BDF8] cursor-pointer"
+              >
+                <img
+                  src={getGameArtwork(g.id)}
+                  alt={g.name}
+                  referrerPolicy="no-referrer"
+                  className="h-12 w-16 shrink-0 rounded-lg object-cover"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-display text-sm font-bold text-white">{g.name}</p>
+                  <p className="truncate text-[11px] text-slate-400">{g.estimatedTime}</p>
+                </div>
+                <Play className="h-4 w-4 shrink-0 text-[#38BDF8] fill-current" />
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Full 22-Game Library with Search + 8 Category Filters */}
       <section className="space-y-6">
-        <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#8B5CF6]">
-              12 Playable Arenas
+              {GAME_CATALOG.length} Playable Arenas · Instant Matchmaking
             </p>
             <h2 className="mt-1 font-display text-2xl sm:text-3xl font-bold text-white">
-              Featured Games & Categories
+              PLAYNOVA Game Library
             </h2>
           </div>
-          <p className="text-xs text-slate-400">
-            Select any game card to launch an instant guest session and play immediately.
-          </p>
+          <div className="relative w-full lg:w-80">
+            <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={`Search all ${GAME_CATALOG.length} games...`}
+              className="w-full rounded-xl border border-white/[0.1] bg-[#0E1324] py-2.5 pl-10 pr-4 text-xs text-white placeholder:text-slate-500 focus:border-[#38BDF8] focus:outline-none"
+            />
+          </div>
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -203,78 +303,106 @@ export function HomepageHero({
           ))}
         </div>
 
-        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
-          {filteredGames.map((game) => (
-            <div
-              key={game.id}
-              className="group overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0E1324] flex flex-col justify-between transition hover:border-[#8B5CF6]/60"
+        {filteredGames.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-white/[0.12] bg-[#0E1324] p-10 text-center">
+            <p className="text-sm font-semibold text-white">No games matched your filter.</p>
+            <button
+              type="button"
+              onClick={() => {
+                setSearchQuery('');
+                setSelectedCategory('All');
+              }}
+              className="mt-3 rounded-lg bg-[#8B5CF6] px-4 py-2 text-xs font-semibold text-white cursor-pointer"
             >
-              <div>
-                <div className="relative aspect-[16/9] w-full overflow-hidden bg-[#060811]">
-                  <img
-                    src={getGameArtwork(game.id)}
-                    alt={`${game.name} arena artwork`}
-                    referrerPolicy="no-referrer"
-                    className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-[#0E1324] via-transparent to-transparent" />
+              Reset Search &amp; Filters
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {filteredGames.map((game) => (
+              <div
+                key={game.id}
+                className="group overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0E1324] flex flex-col justify-between transition hover:border-[#8B5CF6]/60"
+              >
+                <div>
+                  <div className="relative aspect-[16/9] w-full overflow-hidden bg-[#060811]">
+                    <img
+                      src={getGameArtwork(game.id)}
+                      alt={`${game.name} arena artwork`}
+                      referrerPolicy="no-referrer"
+                      className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-[#0E1324] via-transparent to-transparent" />
+                    <div className="absolute right-3 top-3 flex items-center gap-1.5">
+                      {game.recentlyAdded && (
+                        <span className="rounded-md bg-[#38BDF8] px-2 py-0.5 font-mono text-[10px] font-bold text-[#060811]">
+                          NEW
+                        </span>
+                      )}
+                      {game.popularChallenge && (
+                        <span className="rounded-md bg-[#F97316] px-2 py-0.5 font-mono text-[10px] font-bold text-[#060811]">
+                          POPULAR
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="p-5">
+                    <p className="font-mono text-[11px] text-[#38BDF8]">
+                      {game.categories.slice(0, 2).join(' · ')} · {game.estimatedTime}
+                    </p>
+                    <h3 className="mt-1 font-display text-lg font-bold text-white">{game.name}</h3>
+                    <p className="mt-1.5 text-xs leading-relaxed text-slate-400">{game.description}</p>
+                  </div>
                 </div>
-                <div className="p-5">
-                  <p className="font-mono text-[11px] text-[#38BDF8]">
-                    {game.categories.slice(0, 2).join(' · ')} · {game.estimatedTime}
-                  </p>
-                  <h3 className="mt-1 font-display text-lg font-bold text-white">{game.name}</h3>
-                  <p className="mt-1.5 text-xs leading-relaxed text-slate-400">{game.description}</p>
+                <div className="px-5 pb-5">
+                  <button
+                    type="button"
+                    onClick={() => onPlayNow(game.id)}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#151D38] border border-white/[0.08] px-4 py-2.5 text-xs font-bold text-white transition group-hover:bg-[#8B5CF6] group-hover:border-[#8B5CF6] cursor-pointer"
+                  >
+                    Play Now
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </div>
-              <div className="px-5 pb-5">
-                <button
-                  type="button"
-                  onClick={() => onPlayNow(game.id)}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#151D38] border border-white/[0.08] px-4 py-2.5 text-xs font-bold text-white transition group-hover:bg-[#8B5CF6] group-hover:border-[#8B5CF6] cursor-pointer"
-                >
-                  Play Now
-                  <ArrowRight className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
 
-      {/* Popular Multiplayer Challenges & Featured Competitions */}
+      {/* Popular Games & Featured Competitions */}
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="lg:col-span-6 rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6 space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#38BDF8]">
-                Real-Time WebSocket Rooms
+                Auto-Matchmaking · Human &amp; AI
               </p>
               <h2 className="mt-1 font-display text-xl font-bold text-white">
-                Popular Multiplayer Challenges
+                Popular Competitive Games
               </h2>
             </div>
             <button
               type="button"
-              onClick={() => onOpenMultiplayer()}
+              onClick={() => onPlayNow('multiplayer')}
               className="text-xs font-semibold text-[#38BDF8] hover:text-white cursor-pointer"
             >
-              Open Lobby →
+              Matchmaking Hub →
             </button>
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {multiplayerGames.map((g) => (
+            {popularGames.map((g) => (
               <button
                 key={g.id}
                 type="button"
-                onClick={() => onOpenMultiplayer(g.id)}
+                onClick={() => onPlayNow(g.id)}
                 className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-[#060811] p-3.5 text-left transition hover:border-[#38BDF8]/50 cursor-pointer"
               >
-                <div>
-                  <p className="font-display text-sm font-bold text-white">{g.name}</p>
-                  <p className="mt-0.5 text-[11px] text-slate-400">Live 1v1 · Private Code · Chat</p>
+                <div className="min-w-0 pr-2">
+                  <p className="truncate font-display text-sm font-bold text-white">{g.name}</p>
+                  <p className="mt-0.5 text-[11px] text-slate-400">Live 1v1 · Adaptive AI</p>
                 </div>
-                <Users className="h-4 w-4 shrink-0 text-[#38BDF8]" />
+                <Play className="h-4 w-4 shrink-0 text-[#38BDF8] fill-current" />
               </button>
             ))}
           </div>
@@ -284,7 +412,7 @@ export function HomepageHero({
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#F97316]">
-                Scheduled & Exhibition Cups
+                Scheduled &amp; Exhibition Cups
               </p>
               <h2 className="mt-1 font-display text-xl font-bold text-white">Featured Competitions</h2>
             </div>
@@ -321,12 +449,12 @@ export function HomepageHero({
         </div>
       </section>
 
-      {/* Daily Challenges, Rankings & Recently Added */}
+      {/* Daily Challenges, Rankings & Newly Added Games */}
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="lg:col-span-4 rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6 space-y-4">
           <div>
             <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#F97316]">
-              Daily & Weekly Quests
+              Daily &amp; Weekly Quests
             </p>
             <h2 className="mt-1 font-display text-xl font-bold text-white">Daily Challenges</h2>
           </div>
@@ -347,7 +475,7 @@ export function HomepageHero({
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#8B5CF6]">
-                Rankings & Achievements
+                Rankings &amp; Achievements
               </p>
               <h2 className="mt-1 font-display text-xl font-bold text-white">Top Contenders</h2>
             </div>
@@ -388,7 +516,7 @@ export function HomepageHero({
             <p className="text-xs font-mono uppercase tracking-[0.2em] text-emerald-400">
               Fresh Releases
             </p>
-            <h2 className="mt-1 font-display text-xl font-bold text-white">Recently Added Games</h2>
+            <h2 className="mt-1 font-display text-xl font-bold text-white">New Games Added</h2>
           </div>
           <div className="space-y-2">
             {recentlyAdded.map((g) => (
@@ -408,23 +536,23 @@ export function HomepageHero({
         </div>
       </section>
 
-      {/* Bottom Quick-Launch Modes */}
+      {/* Bottom Highlights */}
       <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
         {[
           {
             icon: Cpu,
-            title: 'Adaptive AI Opponents',
-            desc: 'Minimax Chess & Connect Four, custom N-in-a-row Tic-Tac-Toe AI, Memory Recall AI, and timed Trivia & Math benchmarks.',
+            title: 'Intelligent Adaptive AI',
+            desc: 'Alpha-Beta Chess & Checkers, Chain-Aware Dots and Boxes, Corner-Heuristic Reversi, Hunt-Target Battleship, and Minimax Connect Four & Five.',
           },
           {
             icon: Users,
-            title: 'Multiplayer Rooms & Live Chat',
-            desc: 'Private 6-character codes, random queue matchmaking, player availability radar, in-room live chat, and 1-click rematches.',
+            title: 'Universal Auto-Matchmaking',
+            desc: 'Every title searches automatically for an available online opponent and connects seamlessly to smart AI with zero waiting rooms or codes.',
           },
           {
             icon: Calendar,
             title: 'Virtual Coins & Custom Profiles',
-            desc: 'Earn Virtual Coins from wins and tournaments, review full transaction history, and craft custom emblems and profile themes.',
+            desc: 'Earn Virtual Coins from wins and tournaments, unlock cosmetics, review full transaction history, and climb global leaderboards.',
           },
         ].map((box) => (
           <div key={box.title} className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-5">

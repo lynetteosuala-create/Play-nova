@@ -1,38 +1,41 @@
-import { useEffect, useState, type FormEvent } from 'react';
-import { ArrowLeft, Calculator, Clock, Flame, Play, RotateCcw, Trophy } from 'lucide-react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { Calculator, ArrowLeft, Clock, Flame, RotateCcw, Trophy } from 'lucide-react';
 import { GAME_CATALOG } from '../../game/catalog.ts';
-import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
 import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
+import { useUniversalMatchmaking } from '../../hooks/useUniversalMatchmaking.ts';
+import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
+import { createSeededRng } from '../../utils/seededRandom.ts';
 import { soundFx } from '../../utils/sound.ts';
+import { UniversalMatchBar } from '../UniversalMatchBar.tsx';
 
 interface MathPrompt {
   question: string;
   answer: number;
 }
 
-function generateMathPrompt(difficulty: DifficultyLevel): MathPrompt {
+function generateMathPrompt(difficulty: DifficultyLevel, seed: number, idx: number): MathPrompt {
+  const rng = createSeededRng(seed + idx * 97 + 13);
   const maxN = difficulty === 'hard' ? 35 : difficulty === 'medium' ? 20 : 12;
   const ops = difficulty === 'easy' ? ['+', '-'] : ['+', '-', '×', 'missing'];
-  const op = ops[Math.floor(Math.random() * ops.length)];
+  const op = ops[Math.floor(rng() * ops.length)];
 
   if (op === '+') {
-    const a = 2 + Math.floor(Math.random() * maxN);
-    const b = 2 + Math.floor(Math.random() * maxN);
+    const a = 2 + Math.floor(rng() * maxN);
+    const b = 2 + Math.floor(rng() * maxN);
     return { question: `${a} + ${b} = ?`, answer: a + b };
   }
   if (op === '-') {
-    const a = 5 + Math.floor(Math.random() * maxN);
-    const b = 1 + Math.floor(Math.random() * a);
+    const a = 5 + Math.floor(rng() * maxN);
+    const b = 1 + Math.floor(rng() * a);
     return { question: `${a} − ${b} = ?`, answer: a - b };
   }
   if (op === '×') {
-    const a = 2 + Math.floor(Math.random() * (difficulty === 'hard' ? 14 : 10));
-    const b = 2 + Math.floor(Math.random() * (difficulty === 'hard' ? 12 : 9));
+    const a = 2 + Math.floor(rng() * (difficulty === 'hard' ? 14 : 10));
+    const b = 2 + Math.floor(rng() * (difficulty === 'hard' ? 12 : 9));
     return { question: `${a} × ${b} = ?`, answer: a * b };
   }
-  // Missing operand
-  const x = 2 + Math.floor(Math.random() * 14);
-  const a = 3 + Math.floor(Math.random() * 15);
+  const x = 2 + Math.floor(rng() * 14);
+  const a = 3 + Math.floor(rng() * 15);
   return { question: `${a} + [ ? ] = ${a + x}`, answer: x };
 }
 
@@ -50,36 +53,54 @@ export function QuickMathGame({
   onBack,
 }: QuickMathGameProps) {
   const catalog = GAME_CATALOG.find((g) => g.id === 'quick_math')!;
-  const [difficulty, setDifficulty] = useState<DifficultyLevel>('medium');
-  const [phase, setPhase] = useState<'ready' | 'playing' | 'finished'>('ready');
+  const mm = useUniversalMatchmaking('quick_math', { player });
+
+  const isHumanDuel = mm.matchPhase === 'human';
+  const activeDiff: DifficultyLevel = isHumanDuel ? 'medium' : mm.difficulty;
+
   const [timeLeft, setTimeLeft] = useState(60);
-  const [prompt, setPrompt] = useState<MathPrompt>(() => generateMathPrompt('medium'));
+  const [promptIdx, setPromptIdx] = useState(0);
+  const [prompt, setPrompt] = useState<MathPrompt>(() => generateMathPrompt(activeDiff, mm.seed, 0));
   const [answerInput, setAnswerInput] = useState('');
   const [score, setScore] = useState(0);
   const [solvedCount, setSolvedCount] = useState(0);
   const [combo, setCombo] = useState(1);
+  const [finished, setFinished] = useState(false);
   const [rewardBanner, setRewardBanner] = useState<{ scoreDelta: number; xpEarned: number; coinsEarned: number } | null>(
     null
   );
 
   const mathHistory = recentMatches.filter((m) => m.gameId === 'quick_math');
-  const aiBenchmark = difficulty === 'hard' ? 240 : difficulty === 'medium' ? 170 : 110;
+  const aiBenchmark = mm.difficulty === 'hard' ? 240 : mm.difficulty === 'medium' ? 170 : 110;
 
-  const startSprint = (diff = difficulty) => {
-    soundFx.playSelect();
-    setDifficulty(diff);
-    setPhase('playing');
+  const resetSprint = useCallback((diff: DifficultyLevel, seedVal: number) => {
     setTimeLeft(60);
-    setPrompt(generateMathPrompt(diff));
+    setPromptIdx(0);
+    setPrompt(generateMathPrompt(diff, seedVal, 0));
     setAnswerInput('');
     setScore(0);
     setSolvedCount(0);
     setCombo(1);
+    setFinished(false);
     setRewardBanner(null);
+  }, []);
+
+  useEffect(() => {
+    resetSprint(activeDiff, mm.seed);
+  }, [activeDiff, mm.seed, mm.matchPhase, resetSprint]);
+
+  const startSprint = () => {
+    soundFx.playSelect();
+    if (isHumanDuel) {
+      mm.rematchHuman();
+    } else {
+      const nextSeed = mm.rotateLocalSeed();
+      resetSprint(mm.difficulty, nextSeed);
+    }
   };
 
   useEffect(() => {
-    if (phase !== 'playing') return;
+    if (mm.matchPhase === 'searching' || finished) return;
     if (timeLeft <= 0) {
       void finishSprint();
       return;
@@ -87,10 +108,23 @@ export function QuickMathGame({
     const id = window.setTimeout(() => setTimeLeft((t) => t - 1), 1000);
     return () => window.clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, timeLeft]);
+  }, [mm.matchPhase, finished, timeLeft]);
 
   const finishSprint = async () => {
-    setPhase('finished');
+    setFinished(true);
+
+    if (isHumanDuel) {
+      soundFx.playWin();
+      mm.sendDuelProgress({
+        score,
+        progress: solvedCount,
+        maxProgress: 25,
+        finished: true,
+        summary: `${solvedCount} solved · ${score} pts`,
+      });
+      return;
+    }
+
     const outcome: 'win' | 'loss' | 'draw' =
       score > aiBenchmark ? 'win' : score === aiBenchmark ? 'draw' : 'loss';
     if (outcome === 'win') soundFx.playWin();
@@ -101,7 +135,7 @@ export function QuickMathGame({
       const res = await completeSinglePlayerGame(player, {
         gameId: 'quick_math',
         mode: 'sprint_60s',
-        difficulty,
+        difficulty: mm.difficulty,
         outcome,
         opponentLabel: `Speedbot AI (${aiBenchmark} pts)`,
         scoreDelta: score,
@@ -117,18 +151,32 @@ export function QuickMathGame({
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (phase !== 'playing') return;
+    if (finished || mm.matchPhase === 'searching') return;
     const numeric = Number(answerInput.trim());
     if (!Number.isFinite(numeric) || answerInput.trim() === '') return;
 
     if (numeric === prompt.answer) {
       soundFx.playSelect();
       const gain = 10 * combo;
-      setScore((s) => s + gain);
-      setSolvedCount((c) => c + 1);
+      const nextScore = score + gain;
+      const nextSolved = solvedCount + 1;
+      const nextIdx = promptIdx + 1;
+      setScore(nextScore);
+      setSolvedCount(nextSolved);
       setCombo((c) => Math.min(5, c + 1));
-      setPrompt(generateMathPrompt(difficulty));
+      setPromptIdx(nextIdx);
+      setPrompt(generateMathPrompt(activeDiff, mm.seed, nextIdx));
       setAnswerInput('');
+
+      if (isHumanDuel) {
+        mm.sendDuelProgress({
+          score: nextScore,
+          progress: nextSolved,
+          maxProgress: 25,
+          finished: false,
+          summary: `${nextSolved} solved · ${nextScore} pts`,
+        });
+      }
     } else {
       soundFx.playLoss();
       setCombo(1);
@@ -145,57 +193,58 @@ export function QuickMathGame({
             onClick={onBack}
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white cursor-pointer"
           >
-            <ArrowLeft className="h-3.5 w-3.5" /> Back to Hub
+            <ArrowLeft className="h-3.5 w-3.5" /> Back to Games
           </button>
           <h1 className="mt-1 font-display text-2xl font-bold text-white sm:text-3xl">Quick Math Challenge</h1>
         </div>
-        <div className="flex items-center gap-4 font-mono text-xs text-slate-300">
+        <div className="flex items-center gap-4 font-mono text-xs tabular-nums text-slate-300">
           <span>Wins: {player.stats.byGame.quick_math.wins}</span>
           <span>Best Score: {player.stats.byGame.quick_math.bestScore}</span>
         </div>
       </div>
 
+      <UniversalMatchBar
+        matchPhase={mm.matchPhase}
+        secondsLeft={mm.secondsLeft}
+        difficulty={mm.difficulty}
+        onChangeDifficulty={mm.setDifficulty}
+        liveMatch={mm.liveMatch}
+        mySeat={mm.mySeat}
+        opponentSeat={mm.opponentSeat}
+        onlineCount={mm.onlineCount}
+        onSkipToAi={mm.skipToAi}
+        onSearchHuman={mm.searchForHuman}
+        onLeaveHuman={mm.leaveHumanMatch}
+        onRematchHuman={mm.rematchHuman}
+        onSendChat={mm.sendChat}
+        showDuelBar
+        extraControls={
+          mm.matchPhase === 'ai' ? (
+            <button
+              type="button"
+              onClick={startSprint}
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-[#060811] px-3 py-1.5 text-xs font-semibold text-slate-200 hover:text-white cursor-pointer"
+            >
+              <RotateCcw className="h-3.5 w-3.5" /> Restart 60s
+            </button>
+          ) : undefined
+        }
+      />
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="space-y-4 lg:col-span-7">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/[0.08] bg-[#0E1324] p-4">
-            <div className="flex gap-1.5">
-              {(['easy', 'medium', 'hard'] as DifficultyLevel[]).map((d) => (
-                <button
-                  key={d}
-                  type="button"
-                  onClick={() => startSprint(d)}
-                  className={`rounded-lg border px-3 py-1.5 text-xs font-semibold capitalize cursor-pointer ${
-                    difficulty === d
-                      ? 'border-[#F97316] bg-[#F97316]/20 text-white'
-                      : 'border-slate-700 bg-[#060811] text-slate-400'
-                  }`}
-                >
-                  {d}
-                </button>
-              ))}
-            </div>
-            <span className="font-mono text-xs text-slate-300">AI Speedbot Target: {aiBenchmark} pts</span>
-          </div>
-
           <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6 space-y-5">
-            {phase === 'ready' ? (
-              <div className="py-8 text-center space-y-4">
+            {mm.matchPhase === 'searching' ? (
+              <div className="py-10 text-center space-y-3">
                 <Calculator className="mx-auto h-10 w-10 text-[#F97316]" />
-                <h2 className="font-display text-2xl font-bold text-white">60-Second Arithmetic Sprint</h2>
-                <p className="mx-auto max-w-md text-xs text-slate-300">
-                  Beat the {aiBenchmark}-point AI Speedbot benchmark. Build consecutive correct answers up to 5× combo.
+                <p className="font-display text-xl font-bold text-white">Preparing 60-Second Sprint...</p>
+                <p className="text-xs text-slate-400">
+                  Matching against another online solver or Speedbot AI.
                 </p>
-                <button
-                  type="button"
-                  onClick={() => startSprint(difficulty)}
-                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#F97316] to-[#EA580C] px-6 py-3 text-sm font-bold text-white shadow-lg cursor-pointer"
-                >
-                  <Play className="h-4 w-4" /> Start 60s Sprint
-                </button>
               </div>
-            ) : phase === 'playing' ? (
+            ) : !finished ? (
               <>
-                <div className="flex items-center justify-between text-xs font-mono">
+                <div className="flex items-center justify-between text-xs font-mono tabular-nums">
                   <span className="inline-flex items-center gap-1 text-white">
                     <Clock className="h-3.5 w-3.5 text-[#F97316]" /> {timeLeft}s
                   </span>
@@ -203,7 +252,7 @@ export function QuickMathGame({
                     <Flame className="h-3.5 w-3.5" /> Combo {combo}×
                   </span>
                   <span className="text-emerald-400">
-                    Score: {score} / {aiBenchmark}
+                    Score: {score} {!isHumanDuel ? `/ ${aiBenchmark} AI` : ''}
                   </span>
                 </div>
 
@@ -234,10 +283,15 @@ export function QuickMathGame({
               <div className="py-6 text-center space-y-3">
                 <Trophy className="mx-auto h-10 w-10 text-[#F97316]" />
                 <h2 className="font-display text-2xl font-bold text-white">
-                  {score >= aiBenchmark ? 'You Outpaced Speedbot AI!' : 'Sprint Complete'}
+                  {isHumanDuel
+                    ? mm.liveMatch?.winnerSummary || 'Sprint Complete!'
+                    : score >= aiBenchmark
+                    ? 'You Outpaced Speedbot AI!'
+                    : 'Sprint Complete'}
                 </h2>
                 <p className="font-mono text-sm text-slate-300">
-                  Solved: {solvedCount} equations · Final Score: {score} pts (AI Target: {aiBenchmark})
+                  Solved: {solvedCount} equations · Final Score: {score} pts
+                  {!isHumanDuel ? ` (AI Target: ${aiBenchmark})` : ''}
                 </p>
                 {rewardBanner && (
                   <p className="font-mono text-xs text-[#38BDF8]">
@@ -246,7 +300,7 @@ export function QuickMathGame({
                 )}
                 <button
                   type="button"
-                  onClick={() => startSprint(difficulty)}
+                  onClick={startSprint}
                   className="inline-flex items-center gap-1.5 rounded-xl bg-[#8B5CF6] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
                 >
                   <RotateCcw className="h-3.5 w-3.5" /> Play Again
@@ -275,10 +329,10 @@ export function QuickMathGame({
                 {mathHistory.slice(0, 6).map((m) => (
                   <div
                     key={m.id}
-                    className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-[#060811] px-3 py-2 text-xs"
+                    className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-[#060811] px-3 py-2 text-xs"
                   >
                     <span className="text-slate-200 truncate">{m.summary}</span>
-                    <span className="font-mono text-[#F97316]">+{m.scoreDelta}</span>
+                    <span className="font-mono text-[#F97316] shrink-0">+{m.scoreDelta}</span>
                   </div>
                 ))}
               </div>

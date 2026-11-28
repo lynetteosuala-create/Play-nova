@@ -1,11 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Clock, Eraser, Lightbulb, Pencil, RotateCcw, Trophy } from 'lucide-react';
 import { GAME_CATALOG } from '../../game/catalog.ts';
-import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
 import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
+import { useUniversalMatchmaking } from '../../hooks/useUniversalMatchmaking.ts';
+import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
+import { seededShuffle } from '../../utils/seededRandom.ts';
 import { soundFx } from '../../utils/sound.ts';
+import { UniversalMatchBar } from '../UniversalMatchBar.tsx';
 
-function generateSudoku(difficulty: DifficultyLevel): { puzzle: number[]; solution: number[] } {
+function generateSudoku(difficulty: DifficultyLevel, seed: number): { puzzle: number[]; solution: number[] } {
   const base = [
     1, 2, 3, 4, 5, 6, 7, 8, 9,
     4, 5, 6, 7, 8, 9, 1, 2, 3,
@@ -17,20 +20,21 @@ function generateSudoku(difficulty: DifficultyLevel): { puzzle: number[]; soluti
     6, 7, 8, 9, 1, 2, 3, 4, 5,
     9, 1, 2, 3, 4, 5, 6, 7, 8,
   ];
-  const digits = [1, 2, 3, 4, 5, 6, 7, 8, 9].sort(() => Math.random() - 0.5);
+  const digits = seededShuffle([1, 2, 3, 4, 5, 6, 7, 8, 9], seed);
   const solution = base.map((v) => digits[v - 1]);
 
-  // Band & row permutations preserve valid Latin + 3x3 box properties
   const rowOrder: number[] = [];
-  const bandPerm = [0, 1, 2].sort(() => Math.random() - 0.5);
-  for (const b of bandPerm) {
-    const inner = [0, 1, 2].sort(() => Math.random() - 0.5);
+  const bandPerm = seededShuffle([0, 1, 2], seed + 7);
+  for (let i = 0; i < bandPerm.length; i++) {
+    const b = bandPerm[i];
+    const inner = seededShuffle([0, 1, 2], seed + 19 + i);
     for (const r of inner) rowOrder.push(b * 3 + r);
   }
   const colOrder: number[] = [];
-  const stackPerm = [0, 1, 2].sort(() => Math.random() - 0.5);
-  for (const s of stackPerm) {
-    const inner = [0, 1, 2].sort(() => Math.random() - 0.5);
+  const stackPerm = seededShuffle([0, 1, 2], seed + 31);
+  for (let i = 0; i < stackPerm.length; i++) {
+    const s = stackPerm[i];
+    const inner = seededShuffle([0, 1, 2], seed + 43 + i);
     for (const c of inner) colOrder.push(s * 3 + c);
   }
 
@@ -43,7 +47,10 @@ function generateSudoku(difficulty: DifficultyLevel): { puzzle: number[]; soluti
 
   const blanks = difficulty === 'hard' ? 46 : difficulty === 'medium' ? 38 : 28;
   const puzzle = [...permuted];
-  const indices = Array.from({ length: 81 }, (_, i) => i).sort(() => Math.random() - 0.5);
+  const indices = seededShuffle(
+    Array.from({ length: 81 }, (_, i) => i),
+    seed + 99
+  );
   for (let i = 0; i < blanks; i++) {
     puzzle[indices[i]] = 0;
   }
@@ -64,8 +71,10 @@ export function SudokuGame({
   onBack,
 }: SudokuGameProps) {
   const catalog = GAME_CATALOG.find((g) => g.id === 'sudoku')!;
-  const [difficulty, setDifficulty] = useState<DifficultyLevel>('easy');
-  const [data, setData] = useState(() => generateSudoku('easy'));
+  const mm = useUniversalMatchmaking('sudoku', { player });
+
+  const activeDiff: DifficultyLevel = mm.matchPhase === 'human' ? 'medium' : mm.difficulty;
+  const [data, setData] = useState(() => generateSudoku(activeDiff, mm.seed));
   const [grid, setGrid] = useState<number[]>(() => [...data.puzzle]);
   const [notes, setNotes] = useState<Record<number, number[]>>({});
   const [notesMode, setNotesMode] = useState(false);
@@ -78,17 +87,11 @@ export function SudokuGame({
   );
 
   const sudokuHistory = recentMatches.filter((m) => m.gameId === 'sudoku');
+  const isHumanDuel = mm.matchPhase === 'human';
+  const totalBlanks = data.puzzle.filter((v) => v === 0).length;
 
-  useEffect(() => {
-    if (finished) return;
-    const id = window.setInterval(() => setElapsedSec((s) => s + 1), 1000);
-    return () => window.clearInterval(id);
-  }, [finished]);
-
-  const startNewPuzzle = (diff = difficulty) => {
-    soundFx.playClick();
-    setDifficulty(diff);
-    const next = generateSudoku(diff);
+  const resetGrid = useCallback((diff: DifficultyLevel, seedVal: number) => {
+    const next = generateSudoku(diff, seedVal);
     setData(next);
     setGrid([...next.puzzle]);
     setNotes({});
@@ -97,30 +100,65 @@ export function SudokuGame({
     setElapsedSec(0);
     setFinished(null);
     setRewardBanner(null);
+  }, []);
+
+  useEffect(() => {
+    resetGrid(activeDiff, mm.seed);
+  }, [activeDiff, mm.seed, mm.matchPhase, resetGrid]);
+
+  useEffect(() => {
+    if (finished || mm.matchPhase === 'searching') return;
+    const id = window.setInterval(() => setElapsedSec((s) => s + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [finished, mm.matchPhase]);
+
+  const startNewPuzzle = () => {
+    soundFx.playClick();
+    if (isHumanDuel) {
+      mm.rematchHuman();
+    } else {
+      const nextSeed = mm.rotateLocalSeed();
+      resetGrid(mm.difficulty, nextSeed);
+    }
   };
 
-  const reportOutcome = async (outcome: 'win' | 'loss', finalMistakes: number) => {
+  const countSolvedBlanks = (g: number[]) =>
+    g.reduce((acc, v, idx) => acc + (data.puzzle[idx] === 0 && v === data.solution[idx] ? 1 : 0), 0);
+
+  const reportOutcome = async (outcome: 'win' | 'loss', finalMistakes: number, solvedCells: number) => {
     setFinished(outcome);
     if (outcome === 'win') soundFx.playWin();
     else soundFx.playLoss();
 
     const scoreDelta =
       outcome === 'win'
-        ? Math.max(80, (difficulty === 'hard' ? 240 : difficulty === 'medium' ? 180 : 120) - finalMistakes * 15)
-        : 15;
+        ? Math.max(80, (activeDiff === 'hard' ? 240 : activeDiff === 'medium' ? 180 : 120) - finalMistakes * 15 - Math.floor(elapsedSec / 6))
+        : Math.max(15, solvedCells * 3);
+
+    if (isHumanDuel) {
+      mm.sendDuelProgress({
+        score: scoreDelta,
+        progress: solvedCells,
+        maxProgress: totalBlanks,
+        finished: true,
+        summary: outcome === 'win' ? `Solved in ${elapsedSec}s` : `3 mistakes (${solvedCells}/${totalBlanks})`,
+      });
+      return;
+    }
+
     try {
       const res = await completeSinglePlayerGame(player, {
         gameId: 'sudoku',
         mode: 'solo',
-        difficulty,
+        difficulty: mm.difficulty,
         outcome,
-        opponentLabel: `9×9 ${difficulty} Grid`,
+        opponentLabel: `9×9 ${mm.difficulty} Grid`,
         scoreDelta,
         durationSec: Math.max(10, elapsedSec),
         summary:
           outcome === 'win'
-            ? `Solved ${difficulty} Sudoku in ${elapsedSec}s (${finalMistakes} mistakes)`
-            : `Reached 3 mistakes on ${difficulty} Sudoku`,
+            ? `Solved ${mm.difficulty} Sudoku in ${elapsedSec}s (${finalMistakes} mistakes)`
+            : `Reached 3 mistakes on ${mm.difficulty} Sudoku`,
       });
       setRewardBanner(res.rewards);
       onProgressUpdated(res.player, res.newlyUnlocked, res.completedChallenges);
@@ -130,7 +168,7 @@ export function SudokuGame({
   };
 
   const enterNumber = (num: number) => {
-    if (finished || selectedCell === null) return;
+    if (finished || selectedCell === null || mm.matchPhase === 'searching') return;
     if (data.puzzle[selectedCell] !== 0) return;
 
     if (notesMode && num !== 0) {
@@ -153,26 +191,37 @@ export function SudokuGame({
     const correct = data.solution[selectedCell];
     const nextGrid = grid.map((v, i) => (i === selectedCell ? num : v));
     setGrid(nextGrid);
+    const solvedBlanks = countSolvedBlanks(nextGrid);
 
     if (num !== correct) {
       soundFx.playLoss();
       const nextMistakes = mistakes + 1;
       setMistakes(nextMistakes);
       if (nextMistakes >= 3) {
-        void reportOutcome('loss', nextMistakes);
+        void reportOutcome('loss', nextMistakes, solvedBlanks);
       }
       return;
     }
 
     soundFx.playSelect();
     setNotes((prev) => ({ ...prev, [selectedCell]: [] }));
+    if (isHumanDuel) {
+      mm.sendDuelProgress({
+        score: solvedBlanks * 5,
+        progress: solvedBlanks,
+        maxProgress: totalBlanks,
+        finished: false,
+        summary: `${solvedBlanks}/${totalBlanks} cells`,
+      });
+    }
+
     if (nextGrid.every((v, idx) => v === data.solution[idx])) {
-      void reportOutcome('win', mistakes);
+      void reportOutcome('win', mistakes, solvedBlanks);
     }
   };
 
   const handleAiHint = () => {
-    if (finished) return;
+    if (finished || mm.matchPhase === 'searching') return;
     const openIndices = grid
       .map((v, idx) => (v !== data.solution[idx] ? idx : -1))
       .filter((idx) => idx >= 0);
@@ -184,8 +233,9 @@ export function SudokuGame({
     setGrid(nextGrid);
     setSelectedCell(target);
     soundFx.playSelect();
+    const solvedBlanks = countSolvedBlanks(nextGrid);
     if (nextGrid.every((v, idx) => v === data.solution[idx])) {
-      void reportOutcome('win', mistakes);
+      void reportOutcome('win', mistakes, solvedBlanks);
     }
   };
 
@@ -198,52 +248,56 @@ export function SudokuGame({
             onClick={onBack}
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white cursor-pointer"
           >
-            <ArrowLeft className="h-3.5 w-3.5" /> Back to Hub
+            <ArrowLeft className="h-3.5 w-3.5" /> Back to Games
           </button>
           <h1 className="mt-1 font-display text-2xl font-bold text-white sm:text-3xl">Sudoku</h1>
         </div>
-        <div className="flex items-center gap-4 font-mono text-xs text-slate-300">
+        <div className="flex items-center gap-4 font-mono text-xs tabular-nums text-slate-300">
           <span>Wins: {player.stats.byGame.sudoku.wins}</span>
           <span>Points: {player.stats.byGame.sudoku.points}</span>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <div className="space-y-4 lg:col-span-7">
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/[0.08] bg-[#0E1324] p-4">
-            <div className="flex gap-1.5">
-              {(['easy', 'medium', 'hard'] as DifficultyLevel[]).map((d) => (
-                <button
-                  key={d}
-                  type="button"
-                  onClick={() => startNewPuzzle(d)}
-                  className={`rounded-lg border px-3 py-1.5 text-xs font-semibold capitalize cursor-pointer ${
-                    difficulty === d
-                      ? 'border-[#38BDF8] bg-[#38BDF8]/20 text-white'
-                      : 'border-slate-700 bg-[#060811] text-slate-400'
-                  }`}
-                >
-                  {d}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-3 font-mono text-xs">
-              <span className="inline-flex items-center gap-1 text-slate-200">
-                <Clock className="h-3.5 w-3.5 text-[#38BDF8]" /> {elapsedSec}s
-              </span>
-              <span className={mistakes >= 2 ? 'text-rose-400' : 'text-slate-300'}>
-                Mistakes: {mistakes}/3
-              </span>
-            </div>
-
+      <UniversalMatchBar
+        matchPhase={mm.matchPhase}
+        secondsLeft={mm.secondsLeft}
+        difficulty={mm.difficulty}
+        onChangeDifficulty={mm.setDifficulty}
+        liveMatch={mm.liveMatch}
+        mySeat={mm.mySeat}
+        opponentSeat={mm.opponentSeat}
+        onlineCount={mm.onlineCount}
+        onSkipToAi={mm.skipToAi}
+        onSearchHuman={mm.searchForHuman}
+        onLeaveHuman={mm.leaveHumanMatch}
+        onRematchHuman={mm.rematchHuman}
+        onSendChat={mm.sendChat}
+        showDuelBar
+        extraControls={
+          mm.matchPhase === 'ai' ? (
             <button
               type="button"
-              onClick={() => startNewPuzzle(difficulty)}
+              onClick={startNewPuzzle}
               className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-[#060811] px-3 py-1.5 text-xs font-semibold text-slate-200 hover:text-white cursor-pointer"
             >
               <RotateCcw className="h-3.5 w-3.5" /> New Grid
             </button>
+          ) : undefined
+        }
+      />
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        <div className="space-y-4 lg:col-span-7">
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/[0.08] bg-[#0E1324] px-4 py-3 font-mono text-xs tabular-nums">
+            <span className="inline-flex items-center gap-1 text-slate-200">
+              <Clock className="h-3.5 w-3.5 text-[#38BDF8]" /> {elapsedSec}s
+            </span>
+            <span className="text-[#38BDF8]">
+              Solved: {countSolvedBlanks(grid)}/{totalBlanks}
+            </span>
+            <span className={mistakes >= 2 ? 'text-rose-400' : 'text-slate-300'}>
+              Mistakes: {mistakes}/3
+            </span>
           </div>
 
           <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-4 sm:p-5 space-y-4">
@@ -285,14 +339,13 @@ export function SudokuGame({
               </div>
             </div>
 
-            {/* Keypad & Controls */}
             <div className="mx-auto max-w-[432px] space-y-2.5">
               <div className="grid grid-cols-9 gap-1.5">
                 {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
                   <button
                     key={n}
                     type="button"
-                    disabled={Boolean(finished)}
+                    disabled={Boolean(finished) || mm.matchPhase === 'searching'}
                     onClick={() => enterNumber(n)}
                     className="rounded-lg border border-white/[0.1] bg-[#060811] py-2.5 font-mono text-sm font-bold text-white hover:border-[#8B5CF6] hover:bg-[#131932] cursor-pointer"
                   >
@@ -336,7 +389,11 @@ export function SudokuGame({
                 <div>
                   <p className="font-display text-base font-bold text-white flex items-center gap-2">
                     <Trophy className="h-4 w-4 text-[#F97316]" />
-                    {finished === 'win' ? 'Sudoku Completed!' : '3 Mistakes Reached'}
+                    {isHumanDuel
+                      ? mm.liveMatch?.winnerSummary || (finished === 'win' ? 'Sudoku Completed!' : '3 Mistakes Reached')
+                      : finished === 'win'
+                      ? 'Sudoku Completed!'
+                      : '3 Mistakes Reached'}
                   </p>
                   {rewardBanner && (
                     <p className="font-mono text-xs text-slate-300">
@@ -346,7 +403,7 @@ export function SudokuGame({
                 </div>
                 <button
                   type="button"
-                  onClick={() => startNewPuzzle(difficulty)}
+                  onClick={startNewPuzzle}
                   className="rounded-xl bg-[#8B5CF6] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
                 >
                   New Sudoku
@@ -375,10 +432,10 @@ export function SudokuGame({
                 {sudokuHistory.slice(0, 6).map((m) => (
                   <div
                     key={m.id}
-                    className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-[#060811] px-3 py-2 text-xs"
+                    className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-[#060811] px-3 py-2 text-xs"
                   >
                     <span className="text-slate-200 truncate">{m.summary}</span>
-                    <span className="font-mono text-[#38BDF8]">+{m.scoreDelta}</span>
+                    <span className="font-mono text-[#38BDF8] shrink-0">+{m.scoreDelta}</span>
                   </div>
                 ))}
               </div>

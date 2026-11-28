@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Award,
   Bell,
-  Bot,
   ChevronRight,
+  Clock,
   Coins,
+  Flame,
   Gamepad2,
   Globe,
   Heart,
@@ -13,6 +14,7 @@ import {
   Megaphone,
   Menu,
   Play,
+  Search,
   Shield,
   Sparkles,
   Trophy,
@@ -33,15 +35,25 @@ import { RockPaperScissorsGame } from './components/RockPaperScissorsGame.tsx';
 import { SessionRecoveryModal } from './components/SessionRecoveryModal.tsx';
 import { TicTacToeGame } from './components/TicTacToeGame.tsx';
 import { TournamentsSection } from './components/TournamentsSection.tsx';
+import { BattleshipGame } from './components/games/BattleshipGame.tsx';
+import { CheckersGame } from './components/games/CheckersGame.tsx';
 import { ChessGame } from './components/games/ChessGame.tsx';
+import { ConnectFiveGame } from './components/games/ConnectFiveGame.tsx';
 import { ConnectFourGame } from './components/games/ConnectFourGame.tsx';
+import { DotsAndBoxesGame } from './components/games/DotsAndBoxesGame.tsx';
+import { HangmanGame } from './components/games/HangmanGame.tsx';
+import { LudoGame } from './components/games/LudoGame.tsx';
 import { MemoryMatchGame } from './components/games/MemoryMatchGame.tsx';
+import { MinesweeperGame } from './components/games/MinesweeperGame.tsx';
 import { PatternRecognitionGame } from './components/games/PatternRecognitionGame.tsx';
 import { QuickMathGame } from './components/games/QuickMathGame.tsx';
 import { ReactionTestGame } from './components/games/ReactionTestGame.tsx';
+import { ReversiGame } from './components/games/ReversiGame.tsx';
+import { SnakeGame } from './components/games/SnakeGame.tsx';
 import { SudokuGame } from './components/games/SudokuGame.tsx';
 import { TriviaChallengeGame } from './components/games/TriviaChallengeGame.tsx';
 import { WordBattleGame } from './components/games/WordBattleGame.tsx';
+import { WordScrambleGame } from './components/games/WordScrambleGame.tsx';
 import { ALL_GAME_IDS, DEFAULT_CHALLENGES, GAME_CATALOG, GAME_CATEGORIES, MULTIPLAYER_GAME_IDS } from './game/catalog.ts';
 import {
   getLocalInstantMatches,
@@ -78,13 +90,12 @@ export function App() {
   const initialHasStoredToken = Boolean(getStoredPlayerToken());
   const initialNeedsInstantSolo =
     initialRoute.matched &&
-    !initialRoute.roomCode &&
     (initialRoute.view === 'lobby' ||
       initialRoute.view === 'profile' ||
       ALL_GAME_IDS.includes(initialRoute.view as GameId));
 
   const [booting, setBooting] = useState(
-    Boolean(initialHasStoredToken || initialRoute.roomCode || initialRoute.view === 'multiplayer')
+    Boolean(initialHasStoredToken || initialRoute.view === 'multiplayer')
   );
   const [player, setPlayer] = useState<PlayerProfile | null>(() =>
     initialNeedsInstantSolo && !initialHasStoredToken ? getOrCreateInstantLocalPlayer() : null
@@ -97,10 +108,19 @@ export function App() {
     initialRoute.multiplayerGame || 'tictactoe'
   );
   const [selectedCategory, setSelectedCategory] = useState<'All' | GameCategory>('All');
+  const [librarySearch, setLibrarySearch] = useState('');
+  const [recentGameIds, setRecentGameIds] = useState<GameId[]>(() => {
+    try {
+      const raw = localStorage.getItem('playnova_recent_games');
+      const parsed = raw ? (JSON.parse(raw) as string[]) : [];
+      return parsed.filter((id): id is GameId => ALL_GAME_IDS.includes(id as GameId)).slice(0, 8);
+    } catch {
+      return [];
+    }
+  });
   const [rt, setRt] = useState<RealtimeSnapshot>(wsClient.getSnapshot());
 
   const [enteringGuest, setEnteringGuest] = useState(false);
-  const [pendingRoomCode, setPendingRoomCode] = useState<string | null>(initialRoute.roomCode);
   const [launchError, setLaunchError] = useState<{
     message: string;
     retryView: AppView;
@@ -138,12 +158,27 @@ export function App() {
   const playerRef = useRef<PlayerProfile | null>(null);
   playerRef.current = player;
 
+  const recordRecentGame = useCallback((gameId: GameId) => {
+    setRecentGameIds((prev) => {
+      const next = [gameId, ...prev.filter((id) => id !== gameId)].slice(0, 8);
+      try {
+        localStorage.setItem('playnova_recent_games', JSON.stringify(next));
+      } catch {
+        // ignore storage quota errors
+      }
+      return next;
+    });
+  }, []);
+
   const navigate = useCallback((nextView: AppView, mpGameOverride?: MultiplayerGameId) => {
     setView(nextView);
     setInvalidRoutePath(null);
     setLaunchError(null);
     setMobileNavOpen(false);
     setNotifOpen(false);
+    if (ALL_GAME_IDS.includes(nextView as GameId)) {
+      recordRecentGame(nextView as GameId);
+    }
     if (typeof window !== 'undefined') {
       const targetPath = viewToPath(nextView, nextView === 'multiplayer' ? mpGameOverride : undefined);
       const currentFull = `${window.location.pathname}${window.location.search}`;
@@ -152,7 +187,7 @@ export function App() {
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
-  }, []);
+  }, [recordRecentGame]);
 
   const loadPublicTelemetry = useCallback(async () => {
     try {
@@ -312,18 +347,10 @@ export function App() {
             soundFx.configure(res.player.settings.soundEnabled, res.player.settings.soundVolume);
             await loadProgressionAndBoard();
           }
-
-          if (pendingRoomCode) {
-            const codeToJoin = pendingRoomCode;
-            setPendingRoomCode(null);
-            navigate('multiplayer', initialRoute.multiplayerGame || undefined);
-            window.setTimeout(() => wsClient.joinRoomByCode(codeToJoin), 250);
-          }
         } else {
           setStoredPlayerToken(null);
           const parsed = parseLocationToRoute();
-          const needsMultiplayer =
-            parsed.matched && (Boolean(pendingRoomCode) || parsed.view === 'multiplayer');
+          const needsMultiplayer = parsed.matched && parsed.view === 'multiplayer';
           const needsSoloInstant =
             parsed.matched &&
             (parsed.view === 'lobby' ||
@@ -331,11 +358,7 @@ export function App() {
               ALL_GAME_IDS.includes(parsed.view as GameId));
 
           if (needsMultiplayer) {
-            await enterAsAnonymousGuest(
-              'multiplayer',
-              pendingRoomCode,
-              parsed.multiplayerGame || undefined
-            );
+            await enterAsAnonymousGuest('multiplayer', parsed.multiplayerGame || undefined);
           } else if (needsSoloInstant) {
             if (!playerRef.current) {
               const localGuest = getOrCreateInstantLocalPlayer();
@@ -352,8 +375,7 @@ export function App() {
           setStoredPlayerToken(null);
         }
         const parsed = parseLocationToRoute();
-        const needsMultiplayer =
-          parsed.matched && (Boolean(pendingRoomCode) || parsed.view === 'multiplayer');
+        const needsMultiplayer = parsed.matched && parsed.view === 'multiplayer';
         const needsSoloInstant =
           parsed.matched &&
           (parsed.view === 'lobby' ||
@@ -365,11 +387,7 @@ export function App() {
           setMatches(getLocalInstantMatches());
           soundFx.configure(localGuest.settings.soundEnabled, localGuest.settings.soundVolume);
         } else if (active && needsMultiplayer) {
-          await enterAsAnonymousGuest(
-            'multiplayer',
-            pendingRoomCode,
-            parsed.multiplayerGame || undefined
-          );
+          await enterAsAnonymousGuest('multiplayer', parsed.multiplayerGame || undefined);
         }
       } finally {
         if (active) setBooting(false);
@@ -419,7 +437,6 @@ export function App() {
     authedPlayer: PlayerProfile,
     token?: string,
     targetViewOverride?: AppView,
-    roomCodeOverride?: string | null,
     mpGameOverride?: MultiplayerGameId
   ) => {
     const activeToken = token || getStoredPlayerToken();
@@ -433,21 +450,12 @@ export function App() {
     soundFx.configure(authedPlayer.settings.soundEnabled, authedPlayer.settings.soundVolume);
     await loadProgressionAndBoard();
 
-    const codeToJoin = roomCodeOverride ?? pendingRoomCode;
-    if (codeToJoin) {
-      setPendingRoomCode(null);
-      navigate('multiplayer', mpGameOverride);
-      window.setTimeout(() => wsClient.joinRoomByCode(codeToJoin), 300);
-      return;
-    }
-
     const nextView = targetViewOverride || 'lobby';
     navigate(nextView === 'home' ? 'lobby' : nextView, mpGameOverride);
   };
 
   const enterAsAnonymousGuest = async (
     desiredView: AppView = 'lobby',
-    roomCodeToJoin?: string | null,
     mpGameOverride?: MultiplayerGameId
   ) => {
     setEnteringGuest(true);
@@ -455,7 +463,7 @@ export function App() {
     try {
       const { player: guestPlayer, token } = await ensureAnonymousGuestSession();
       soundFx.playWin();
-      await handleAuthenticated(guestPlayer, token, desiredView, roomCodeToJoin, mpGameOverride);
+      await handleAuthenticated(guestPlayer, token, desiredView, mpGameOverride);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not initialize PLAYNOVA guest session.';
       setLaunchError({
@@ -552,7 +560,7 @@ export function App() {
       navigate('multiplayer', mpTarget);
       return;
     }
-    void enterAsAnonymousGuest('multiplayer', undefined, mpTarget);
+    void enterAsAnonymousGuest('multiplayer', mpTarget);
   };
 
   const handleMarkNotificationsRead = async () => {
@@ -624,10 +632,24 @@ export function App() {
         { id: 'link_preview', label: 'Link Preview' },
       ];
 
-  const filteredCatalog =
-    selectedCategory === 'All'
-      ? GAME_CATALOG
-      : GAME_CATALOG.filter((g) => g.categories.includes(selectedCategory));
+  const normalizedQuery = librarySearch.trim().toLowerCase();
+  const filteredCatalog = GAME_CATALOG.filter((g) => {
+    const catOk = selectedCategory === 'All' || g.categories.includes(selectedCategory);
+    if (!catOk) return false;
+    if (!normalizedQuery) return true;
+    return (
+      g.name.toLowerCase().includes(normalizedQuery) ||
+      g.tagline.toLowerCase().includes(normalizedQuery) ||
+      g.description.toLowerCase().includes(normalizedQuery) ||
+      g.categories.some((c) => c.toLowerCase().includes(normalizedQuery))
+    );
+  });
+
+  const popularCatalog = GAME_CATALOG.filter((g) => g.popularChallenge).slice(0, 6);
+  const recentlyPlayedCatalog = recentGameIds
+    .map((gid) => GAME_CATALOG.find((g) => g.id === gid))
+    .filter((g): g is (typeof GAME_CATALOG)[number] => Boolean(g))
+    .slice(0, 4);
 
   return (
     <div
@@ -825,47 +847,6 @@ export function App() {
         </div>
       )}
 
-      {/* Incoming Live Multiplayer Invitations */}
-      {player && rt.pendingInvites.length > 0 && (
-        <div className="mx-auto mt-4 w-full max-w-7xl px-4 sm:px-6 space-y-2">
-          {rt.pendingInvites.map((invite) => (
-            <div
-              key={`${invite.roomId}-${invite.createdAt}`}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#F97316]/40 bg-[#F97316]/15 px-4 py-3 text-sm text-orange-100"
-            >
-              <div className="flex items-center gap-2.5">
-                <Users className="h-4 w-4 shrink-0 text-[#F97316]" />
-                <span>
-                  <strong>{invite.fromUsername}</strong> invited you to a live{' '}
-                  <strong className="capitalize">{invite.gameId.replace('_', ' ')}</strong> match (Room{' '}
-                  <code className="font-mono text-[#F97316]">{invite.roomCode}</code>)
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    wsClient.joinRoom(invite.roomId);
-                    wsClient.dismissInvite(invite.roomId);
-                    navigate('multiplayer');
-                  }}
-                  className="rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 cursor-pointer"
-                >
-                  Accept & Join
-                </button>
-                <button
-                  type="button"
-                  onClick={() => wsClient.dismissInvite(invite.roomId)}
-                  className="rounded-lg border border-white/[0.15] px-3 py-1.5 text-xs text-slate-300 hover:text-white cursor-pointer"
-                >
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
       {/* Celebratory Achievement / Challenge Toast */}
       {toastBanner && (
         <div className="mx-auto mt-4 w-full max-w-7xl px-4 sm:px-6">
@@ -973,14 +954,15 @@ export function App() {
           <HomepageHero
             publicStats={{
               onlinePlayers: Math.max(publicStats.onlinePlayers, rt.onlinePlayers.length),
-              activeRooms: Math.max(publicStats.activeRooms, rt.publicRooms.length),
+              activeRooms: publicStats.activeRooms,
               totalPlayers: publicStats.totalPlayers,
               totalMatches: publicStats.totalMatches,
             }}
             topLeaders={topLeaders}
             tournaments={tournaments}
+            recentMatches={matches}
+            recentGameIds={recentGameIds}
             onPlayNow={(desired) => handlePlayAction(desired || 'lobby')}
-            onOpenMultiplayer={(gameId) => handleOpenMultiplayerForGame(gameId)}
             onNavigatePublic={(publicView) => navigate(publicView)}
           />
         )}
@@ -1009,7 +991,7 @@ export function App() {
                     />
                     <div>
                       <p className="font-mono text-xs uppercase tracking-[0.2em] text-[#38BDF8]">
-                        PLAYNOVA Lobby · Ready to Compete
+                        PLAYNOVA Lobby · Universal Matchmaking Ready
                       </p>
                       <h1 className="font-display text-3xl font-bold tracking-tight text-white sm:text-4xl">
                         {player.username}
@@ -1018,7 +1000,7 @@ export function App() {
                   </div>
 
                   <p className="max-w-xl text-sm leading-relaxed text-slate-300 sm:text-base">
-                    Jump into 12 interactive arenas, battle intelligent AI rivals, enter real-time multiplayer rooms with live chat, or compete in single-elimination tournaments.
+                    Jump straight into {GAME_CATALOG.length} interactive games with automatic online opponent matching, adaptive AI fallback, virtual rewards, and tournaments.
                   </p>
 
                   <div className="flex flex-wrap gap-3">
@@ -1028,7 +1010,7 @@ export function App() {
                       className="inline-flex items-center gap-2 rounded-lg bg-[#8B5CF6] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#7C3AED] cursor-pointer"
                     >
                       <Users className="h-4 w-4" />
-                      Multiplayer & Mixed Rooms ({rt.onlinePlayers.length} online)
+                      Matchmaking Hub ({rt.onlinePlayers.length} online)
                     </button>
                     <button
                       type="button"
@@ -1093,9 +1075,9 @@ export function App() {
                       </p>
                     </div>
                     <div className="rounded-lg border border-white/[0.06] bg-[#0E1324] p-3">
-                      <p className="text-[11px] text-slate-400">Live Rooms</p>
+                      <p className="text-[11px] text-slate-400">Online Now</p>
                       <p className="mt-1 font-mono text-lg font-bold text-emerald-400 tabular-nums">
-                        {rt.publicRooms.length}
+                        {Math.max(publicStats.onlinePlayers, rt.onlinePlayers.length)}
                       </p>
                     </div>
                   </div>
@@ -1139,22 +1121,81 @@ export function App() {
               </section>
             )}
 
-            {/* 12-Game Catalog with 7 Category Filters */}
+            {/* Recently Played & Popular Quick Strips */}
+            {(recentlyPlayedCatalog.length > 0 || popularCatalog.length > 0) && (
+              <section className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+                {recentlyPlayedCatalog.length > 0 && (
+                  <div className="lg:col-span-5 rounded-2xl border border-white/[0.08] bg-[#0E1324] p-5 space-y-3">
+                    <h2 className="font-display text-base font-bold text-white flex items-center gap-2">
+                      <Clock className="h-4 w-4 text-[#38BDF8]" />
+                      Recently Played
+                    </h2>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {recentlyPlayedCatalog.map((g) => (
+                        <button
+                          key={g.id}
+                          type="button"
+                          onClick={() => handlePlayAction(g.id)}
+                          className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-[#060811] px-3 py-2.5 text-left text-xs transition hover:border-[#38BDF8]/60 cursor-pointer"
+                        >
+                          <span className="truncate font-semibold text-white">{g.name}</span>
+                          <Play className="h-3.5 w-3.5 shrink-0 text-[#38BDF8] fill-current" />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className={`${recentlyPlayedCatalog.length > 0 ? 'lg:col-span-7' : 'lg:col-span-12'} rounded-2xl border border-white/[0.08] bg-[#0E1324] p-5 space-y-3`}>
+                  <h2 className="font-display text-base font-bold text-white flex items-center gap-2">
+                    <Flame className="h-4 w-4 text-[#F97316]" />
+                    Popular Competitive Picks
+                  </h2>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                    {popularCatalog.map((g) => (
+                      <button
+                        key={g.id}
+                        type="button"
+                        onClick={() => handlePlayAction(g.id)}
+                        className="flex items-center justify-between rounded-xl border border-white/[0.08] bg-[#060811] px-3 py-2.5 text-left text-xs transition hover:border-[#F97316]/60 cursor-pointer"
+                      >
+                        <span className="truncate font-semibold text-white">{g.name}</span>
+                        <Play className="h-3.5 w-3.5 shrink-0 text-[#F97316] fill-current" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {/* 22-Game Catalog with Live Search & 8 Category Filters */}
             <section className="space-y-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                 <div>
                   <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#38BDF8]">
-                    12 Interactive Arenas · Solo AI · Local 2P · Online Multiplayer
+                    {GAME_CATALOG.length} Interactive Arenas · Auto-Match Human 1v1 &amp; Smart AI
                   </p>
                   <h2 className="mt-1 font-display text-2xl font-bold text-white">Select Your Game</h2>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => navigate('games')}
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-slate-300 hover:text-white cursor-pointer"
-                >
-                  Full Rules & Catalog <ChevronRight className="h-4 w-4" />
-                </button>
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="relative w-full sm:w-64">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      value={librarySearch}
+                      onChange={(e) => setLibrarySearch(e.target.value)}
+                      placeholder={`Search ${GAME_CATALOG.length} games...`}
+                      className="w-full rounded-lg border border-white/[0.1] bg-[#0E1324] py-2 pl-9 pr-3 text-xs text-white placeholder:text-slate-500 focus:border-[#38BDF8] focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => navigate('games')}
+                    className="inline-flex items-center gap-1 text-xs font-semibold text-slate-300 hover:text-white cursor-pointer"
+                  >
+                    Full Rules &amp; Catalog <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
 
               <div className="flex flex-wrap gap-2">
@@ -1196,6 +1237,11 @@ export function App() {
                         >
                           {game.difficultySummary}
                         </span>
+                        {game.recentlyAdded && (
+                          <span className="absolute right-3 top-3 rounded bg-[#38BDF8] px-2 py-0.5 font-mono text-[10px] font-bold text-[#060811]">
+                            NEW
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex flex-1 flex-col justify-between p-5 space-y-4">
@@ -1227,16 +1273,6 @@ export function App() {
                               <Gamepad2 className="h-4 w-4" />
                               Play Now
                             </button>
-                            {game.supportsMultiplayer && (
-                              <button
-                                type="button"
-                                onClick={() => handleOpenMultiplayerForGame(game.id)}
-                                className="inline-flex items-center justify-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-3 py-2 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-900/40 cursor-pointer"
-                              >
-                                <Bot className="h-3.5 w-3.5" />
-                                Online
-                              </button>
-                            )}
                             <button
                               type="button"
                               onClick={() => void handleCopyGameLink(game.id)}
@@ -1318,7 +1354,7 @@ export function App() {
                   </div>
                   {matches.length === 0 ? (
                     <p className="mt-4 text-sm text-slate-400">
-                      You have not completed a match yet. Pick any of the 12 PLAYNOVA arenas above to start building your record!
+                      You have not completed a match yet. Pick any of the {GAME_CATALOG.length} PLAYNOVA arenas above to start building your record!
                     </p>
                   ) : (
                     <div className="mt-4 divide-y divide-white/[0.06]">
@@ -1440,14 +1476,26 @@ export function App() {
         {activeView === 'games' && (
           <div className="space-y-8">
             <div className="border-b border-white/[0.08] pb-6 space-y-4">
-              <div>
-                <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#38BDF8]">
-                  Complete 12-Game Collection
-                </p>
-                <h1 className="mt-1 font-display text-3xl font-bold text-white">PLAYNOVA Arcade Catalog</h1>
-                <p className="mt-2 max-w-2xl text-sm text-slate-400">
-                  Filter by genre below and launch Solo vs AI, Local 2-Player, Online vs Humans, or Mixed Arenas.
-                </p>
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <p className="text-xs font-mono uppercase tracking-[0.2em] text-[#38BDF8]">
+                    Complete {GAME_CATALOG.length}-Game Collection
+                  </p>
+                  <h1 className="mt-1 font-display text-3xl font-bold text-white">PLAYNOVA Arcade Catalog</h1>
+                  <p className="mt-2 max-w-2xl text-sm text-slate-400">
+                    Filter by genre or search below—every game automatically searches for online human opponents and connects to intelligent AI with zero wait.
+                  </p>
+                </div>
+                <div className="relative w-full sm:w-72">
+                  <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={librarySearch}
+                    onChange={(e) => setLibrarySearch(e.target.value)}
+                    placeholder={`Search all ${GAME_CATALOG.length} games...`}
+                    className="w-full rounded-xl border border-white/[0.1] bg-[#0E1324] py-2.5 pl-10 pr-4 text-xs text-white placeholder:text-slate-500 focus:border-[#38BDF8] focus:outline-none"
+                  />
+                </div>
               </div>
               <div className="flex flex-wrap gap-2">
                 {(['All', ...GAME_CATEGORIES] as const).map((cat) => (
@@ -1508,21 +1556,11 @@ export function App() {
                           <button
                             type="button"
                             onClick={() => handlePlayAction(game.id)}
-                            className="inline-flex items-center gap-2 rounded-lg bg-[#8B5CF6] px-4 py-2.5 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
+                            className="inline-flex items-center gap-2 rounded-lg bg-[#8B5CF6] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
                           >
                             <Play className="h-3.5 w-3.5 fill-current" />
-                            Play Now
+                            Play Now (Auto-Match / AI)
                           </button>
-                          {game.supportsMultiplayer && (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenMultiplayerForGame(game.id)}
-                              className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-950/30 px-4 py-2.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-900/40 cursor-pointer"
-                            >
-                              <Users className="h-3.5 w-3.5" />
-                              Online / Mixed Arena
-                            </button>
-                          )}
                         </div>
                       </div>
                     </div>
@@ -1537,8 +1575,7 @@ export function App() {
           <MultiplayerSection
             player={player}
             defaultGame={multiplayerGame}
-            onRefreshProfile={() => void refreshPlayerProfile()}
-            onSwitchToSoloAi={(gameId) => navigate(gameId)}
+            onLaunchGame={(gameId) => handlePlayAction(gameId)}
           />
         )}
 
@@ -1558,7 +1595,6 @@ export function App() {
             player={player}
             recentMatches={matches}
             onProgressUpdated={handleProgressUpdated}
-            onOpenMultiplayer={() => handleOpenMultiplayerForGame('tictactoe')}
             onBack={() => navigate('lobby')}
           />
         )}
@@ -1568,7 +1604,6 @@ export function App() {
             player={player}
             recentMatches={matches}
             onProgressUpdated={handleProgressUpdated}
-            onOpenMultiplayer={() => handleOpenMultiplayerForGame('rps')}
             onBack={() => navigate('lobby')}
           />
         )}
@@ -1578,7 +1613,6 @@ export function App() {
             player={player}
             recentMatches={matches}
             onProgressUpdated={handleProgressUpdated}
-            onOpenMultiplayer={() => handleOpenMultiplayerForGame('guess_number')}
             onBack={() => navigate('lobby')}
           />
         )}
@@ -1588,7 +1622,15 @@ export function App() {
             player={player}
             recentMatches={matches}
             onProgressUpdated={handleProgressUpdated}
-            onOpenMultiplayer={() => handleOpenMultiplayerForGame('connect_four')}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'connect_five' && player && (
+          <ConnectFiveGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
             onBack={() => navigate('lobby')}
           />
         )}
@@ -1598,7 +1640,51 @@ export function App() {
             player={player}
             recentMatches={matches}
             onProgressUpdated={handleProgressUpdated}
-            onOpenMultiplayer={() => handleOpenMultiplayerForGame('chess')}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'checkers' && player && (
+          <CheckersGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'ludo' && player && (
+          <LudoGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'reversi' && player && (
+          <ReversiGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'battleship' && player && (
+          <BattleshipGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'dots_and_boxes' && player && (
+          <DotsAndBoxesGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
             onBack={() => navigate('lobby')}
           />
         )}
@@ -1614,6 +1700,24 @@ export function App() {
 
         {activeView === 'word_battle' && player && (
           <WordBattleGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'word_scramble' && player && (
+          <WordScrambleGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'hangman' && player && (
+          <HangmanGame
             player={player}
             recentMatches={matches}
             onProgressUpdated={handleProgressUpdated}
@@ -1659,6 +1763,24 @@ export function App() {
 
         {activeView === 'pattern_recognition' && player && (
           <PatternRecognitionGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'snake' && player && (
+          <SnakeGame
+            player={player}
+            recentMatches={matches}
+            onProgressUpdated={handleProgressUpdated}
+            onBack={() => navigate('lobby')}
+          />
+        )}
+
+        {activeView === 'minesweeper' && player && (
+          <MinesweeperGame
             player={player}
             recentMatches={matches}
             onProgressUpdated={handleProgressUpdated}

@@ -1,7 +1,6 @@
 import type {
+  GameId,
   OnlinePlayerSummary,
-  PublicRoomSummary,
-  RoomInviteEvent,
   RoomState,
 } from '../types.ts';
 import type { PromoKind } from '../game/chessEngine.ts';
@@ -12,10 +11,8 @@ export type WsConnectionStatus = 'disconnected' | 'connecting' | 'connected' | '
 export interface RealtimeSnapshot {
   status: WsConnectionStatus;
   onlinePlayers: OnlinePlayerSummary[];
-  publicRooms: PublicRoomSummary[];
   currentRoom: RoomState | null;
-  pendingInvites: RoomInviteEvent[];
-  queueState: { queued: boolean; gameId?: string; mode?: string; position?: number };
+  queueState: { queued: boolean; gameId?: GameId; position?: number };
   lastError: string | null;
 }
 
@@ -33,9 +30,7 @@ class PlaynovaWsClient {
   private state: RealtimeSnapshot = {
     status: 'disconnected',
     onlinePlayers: [],
-    publicRooms: [],
     currentRoom: null,
-    pendingInvites: [],
     queueState: { queued: false },
     lastError: null,
   };
@@ -59,12 +54,6 @@ class PlaynovaWsClient {
 
   public clearError() {
     if (this.state.lastError) this.update({ lastError: null });
-  }
-
-  public dismissInvite(roomId: string) {
-    this.update({
-      pendingInvites: this.state.pendingInvites.filter((i) => i.roomId !== roomId),
-    });
   }
 
   public connect(explicitToken?: string | null) {
@@ -125,9 +114,6 @@ class PlaynovaWsClient {
         case 'presence:list':
           this.update({ onlinePlayers: (p.players as OnlinePlayerSummary[]) || [] });
           break;
-        case 'rooms:list':
-          this.update({ publicRooms: (p.rooms as PublicRoomSummary[]) || [] });
-          break;
         case 'room:state':
           this.update({
             currentRoom: p.room as RoomState,
@@ -139,27 +125,17 @@ class PlaynovaWsClient {
           this.update({ currentRoom: null });
           break;
         case 'room:error':
-          this.update({ lastError: String(p.error || 'Multiplayer action failed.') });
+          this.update({ lastError: String(p.error || 'Match action failed.') });
           break;
         case 'queue:status':
           this.update({
             queueState: {
               queued: Boolean(p.queued),
-              gameId: p.gameId as string | undefined,
-              mode: p.mode as string | undefined,
+              gameId: p.gameId as GameId | undefined,
               position: p.position as number | undefined,
             },
           });
           break;
-        case 'invite:received': {
-          const invite = p as unknown as RoomInviteEvent;
-          const deduped = [invite, ...this.state.pendingInvites.filter((i) => i.roomId !== invite.roomId)].slice(
-            0,
-            5
-          );
-          this.update({ pendingInvites: deduped });
-          break;
-        }
       }
     };
 
@@ -192,9 +168,7 @@ class PlaynovaWsClient {
     this.update({
       status: 'disconnected',
       onlinePlayers: [],
-      publicRooms: [],
       currentRoom: null,
-      pendingInvites: [],
       queueState: { queued: false },
       lastError: null,
     });
@@ -212,27 +186,34 @@ class PlaynovaWsClient {
   }
 
   public emit(event: string, payload: Record<string, unknown> = {}) {
-    if (!this.ws) {
-      this.update({ lastError: 'Reconnecting to PLAYNOVA multiplayer server...' });
-      return;
-    }
+    if (!this.ws) return;
     if (this.ws.readyState === WebSocket.CONNECTING) {
       this.pendingEmits.push({ event, payload });
       return;
     }
-    if (this.ws.readyState !== WebSocket.OPEN) {
-      this.update({ lastError: 'Reconnecting to PLAYNOVA multiplayer server...' });
-      return;
-    }
+    if (this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify({ event, payload }));
   }
 
-  public joinRoom(roomId: string) {
-    this.emit('room:join', { roomId });
+  public findMatch(
+    gameId: GameId,
+    options: { tttWinTarget?: number; tttBoardSize?: number; rpsTargetWins?: number } = {}
+  ) {
+    this.emit('matchmaking:find', { gameId, ...options });
   }
 
-  public joinRoomByCode(code: string) {
-    this.emit('room:join', { code: code.trim().toUpperCase() });
+  public cancelMatchmaking() {
+    this.emit('matchmaking:cancel');
+    this.update({ queueState: { queued: false } });
+  }
+
+  public leaveMatch() {
+    this.emit('match:leave');
+    this.update({ currentRoom: null });
+  }
+
+  public rematch() {
+    this.emit('match:rematch');
   }
 
   public sendChatMessage(text: string) {
@@ -243,8 +224,22 @@ class PlaynovaWsClient {
     this.emit('c4:drop', { col });
   }
 
+  public dropConnectFive(col: number, popOut = false) {
+    this.emit('c5:drop', { col, popOut });
+  }
+
   public makeChessMove(from: number, to: number, promo?: PromoKind) {
     this.emit('chess:move', { from, to, promo });
+  }
+
+  public submitDuelProgress(payload: {
+    score: number;
+    progress: number;
+    maxProgress: number;
+    finished?: boolean;
+    summary?: string;
+  }) {
+    this.emit('duel:progress', payload);
   }
 }
 

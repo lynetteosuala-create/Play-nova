@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, CheckCircle2, Clock, HelpCircle, Lightbulb, RotateCcw, Trophy, XCircle } from 'lucide-react';
 import { GAME_CATALOG } from '../../game/catalog.ts';
-import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
 import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
+import { useUniversalMatchmaking } from '../../hooks/useUniversalMatchmaking.ts';
+import type { MatchRecord, PlayerProfile } from '../../types.ts';
+import { createSeededRng, seededShuffle } from '../../utils/seededRandom.ts';
 import { soundFx } from '../../utils/sound.ts';
+import { UniversalMatchBar } from '../UniversalMatchBar.tsx';
 
 interface TriviaQuestion {
   topic: 'Gaming & Tech' | 'Science' | 'World Geography' | 'History' | 'Logic & Numbers';
@@ -47,9 +50,18 @@ export function TriviaChallengeGame({
   onBack,
 }: TriviaChallengeGameProps) {
   const catalog = GAME_CATALOG.find((g) => g.id === 'trivia_challenge')!;
+  const mm = useUniversalMatchmaking('trivia_challenge', { player });
+
   const [topicFilter, setTopicFilter] = useState<'All' | TriviaQuestion['topic']>('All');
-  const [difficulty, setDifficulty] = useState<DifficultyLevel>('medium');
-  const [deck, setDeck] = useState<TriviaQuestion[]>(() => [...TRIVIA_BANK].sort(() => Math.random() - 0.5).slice(0, 10));
+  const deck = useMemo(() => {
+    if (mm.matchPhase === 'human' || topicFilter === 'All') {
+      return seededShuffle(TRIVIA_BANK, mm.seed).slice(0, 10);
+    }
+    const pool = seededShuffle(TRIVIA_BANK.filter((q) => q.topic === topicFilter), mm.seed);
+    const extra = seededShuffle(TRIVIA_BANK.filter((q) => q.topic !== topicFilter), mm.seed + 13);
+    return [...pool, ...extra].slice(0, 10);
+  }, [mm.matchPhase, mm.seed, topicFilter]);
+
   const [qIndex, setQIndex] = useState(0);
   const [timeLeft, setTimeLeft] = useState(15);
   const [selectedOpt, setSelectedOpt] = useState<number | null>(null);
@@ -66,14 +78,9 @@ export function TriviaChallengeGame({
   const [startedAt, setStartedAt] = useState(Date.now());
 
   const triviaHistory = recentMatches.filter((m) => m.gameId === 'trivia_challenge');
+  const isHumanDuel = mm.matchPhase === 'human';
 
-  const startBlitz = (topic = topicFilter) => {
-    soundFx.playClick();
-    setTopicFilter(topic);
-    const pool = topic === 'All' ? TRIVIA_BANK : TRIVIA_BANK.filter((q) => q.topic === topic);
-    const extra = TRIVIA_BANK.filter((q) => q.topic !== topic);
-    const combined = [...pool.sort(() => Math.random() - 0.5), ...extra.sort(() => Math.random() - 0.5)].slice(0, 10);
-    setDeck(combined);
+  const resetState = useCallback(() => {
     setQIndex(0);
     setTimeLeft(15);
     setSelectedOpt(null);
@@ -86,10 +93,38 @@ export function TriviaChallengeGame({
     setFinished(false);
     setRewardBanner(null);
     setStartedAt(Date.now());
+  }, []);
+
+  useEffect(() => {
+    resetState();
+  }, [mm.seed, mm.matchPhase, resetState]);
+
+  const startBlitz = (topic = topicFilter) => {
+    soundFx.playClick();
+    setTopicFilter(topic);
+    if (isHumanDuel) {
+      mm.rematchHuman();
+    } else {
+      mm.rotateLocalSeed();
+      resetState();
+    }
   };
 
   const finishBlitz = async (finalP: number, finalA: number, finalCorrect: number) => {
     setFinished(true);
+
+    if (isHumanDuel) {
+      soundFx.playWin();
+      mm.sendDuelProgress({
+        score: finalP,
+        progress: 10,
+        maxProgress: 10,
+        finished: true,
+        summary: `${finalCorrect}/10 correct · ${finalP} pts`,
+      });
+      return;
+    }
+
     const outcome: 'win' | 'loss' | 'draw' = finalP > finalA ? 'win' : finalP < finalA ? 'loss' : 'draw';
     if (outcome === 'win') soundFx.playWin();
     else if (outcome === 'draw') soundFx.playDraw();
@@ -99,9 +134,9 @@ export function TriviaChallengeGame({
       const res = await completeSinglePlayerGame(player, {
         gameId: 'trivia_challenge',
         mode: 'vs_ai',
-        difficulty,
+        difficulty: mm.difficulty,
         outcome,
-        opponentLabel: `Quizmaster AI (${difficulty})`,
+        opponentLabel: `Quizmaster AI (${mm.difficulty})`,
         scoreDelta: finalP,
         durationSec: Math.max(8, Math.round((Date.now() - startedAt) / 1000)),
         summary: `${finalCorrect}/10 correct · ${finalP} vs ${finalA} AI`,
@@ -114,7 +149,7 @@ export function TriviaChallengeGame({
   };
 
   useEffect(() => {
-    if (finished || selectedOpt !== null) return;
+    if (mm.matchPhase === 'searching' || finished || selectedOpt !== null) return;
     if (timeLeft <= 0) {
       handleAnswer(-1);
       return;
@@ -122,18 +157,19 @@ export function TriviaChallengeGame({
     const t = window.setTimeout(() => setTimeLeft((s) => s - 1), 1000);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeLeft, finished, selectedOpt]);
+  }, [mm.matchPhase, timeLeft, finished, selectedOpt]);
 
   const handleAnswer = (optIdx: number) => {
-    if (finished || selectedOpt !== null) return;
+    if (mm.matchPhase === 'searching' || finished || selectedOpt !== null) return;
     setSelectedOpt(optIdx);
     const currentQ = deck[qIndex];
     const isCorrect = optIdx === currentQ.answerIdx;
 
     const nextStreak = isCorrect ? streak + 1 : 0;
     const pGain = isCorrect ? 20 + Math.min(15, nextStreak * 3) + Math.floor(timeLeft / 2) : 0;
-    const aiAccuracy = difficulty === 'hard' ? 0.8 : difficulty === 'medium' ? 0.65 : 0.45;
-    const aiGain = Math.random() < aiAccuracy ? 24 : 0;
+    const rng = createSeededRng(mm.seed + qIndex * 41);
+    const aiAccuracy = mm.difficulty === 'hard' ? 0.8 : mm.difficulty === 'medium' ? 0.65 : 0.45;
+    const aiGain = rng() < aiAccuracy ? 24 : 0;
 
     const nextP = playerScore + pGain;
     const nextA = aiScore + aiGain;
@@ -146,6 +182,16 @@ export function TriviaChallengeGame({
     if (isCorrect) soundFx.playSelect();
     else soundFx.playLoss();
 
+    if (isHumanDuel) {
+      mm.sendDuelProgress({
+        score: nextP,
+        progress: qIndex + 1,
+        maxProgress: deck.length,
+        finished: false,
+        summary: `${nextC}/${qIndex + 1} correct · ${nextP} pts`,
+      });
+    }
+
     window.setTimeout(() => {
       if (qIndex >= deck.length - 1) {
         void finishBlitz(nextP, nextA, nextC);
@@ -155,12 +201,15 @@ export function TriviaChallengeGame({
         setSelectedOpt(null);
         setHiddenOpts([]);
       }
-    }, 950);
+    }, 900);
   };
 
   const useFiftyFifty = () => {
     if (lifelinesLeft <= 0 || selectedOpt !== null || hiddenOpts.length > 0 || finished) return;
-    const wrong = [0, 1, 2, 3].filter((i) => i !== deck[qIndex].answerIdx).sort(() => Math.random() - 0.5);
+    const wrong = seededShuffle(
+      [0, 1, 2, 3].filter((i) => i !== deck[qIndex].answerIdx),
+      mm.seed + qIndex * 19
+    );
     setHiddenOpts(wrong.slice(0, 2));
     setLifelinesLeft((l) => l - 1);
     soundFx.playSelect();
@@ -177,20 +226,37 @@ export function TriviaChallengeGame({
             onClick={onBack}
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white cursor-pointer"
           >
-            <ArrowLeft className="h-3.5 w-3.5" /> Back to Hub
+            <ArrowLeft className="h-3.5 w-3.5" /> Back to Games
           </button>
           <h1 className="mt-1 font-display text-2xl font-bold text-white sm:text-3xl">Trivia Challenge</h1>
         </div>
-        <div className="flex items-center gap-4 font-mono text-xs text-slate-300">
+        <div className="flex items-center gap-4 font-mono text-xs tabular-nums text-slate-300">
           <span>Wins: {player.stats.byGame.trivia_challenge.wins}</span>
           <span>Points: {player.stats.byGame.trivia_challenge.points}</span>
         </div>
       </div>
 
+      <UniversalMatchBar
+        matchPhase={mm.matchPhase}
+        secondsLeft={mm.secondsLeft}
+        difficulty={mm.difficulty}
+        onChangeDifficulty={mm.setDifficulty}
+        liveMatch={mm.liveMatch}
+        mySeat={mm.mySeat}
+        opponentSeat={mm.opponentSeat}
+        onlineCount={mm.onlineCount}
+        onSkipToAi={mm.skipToAi}
+        onSearchHuman={mm.searchForHuman}
+        onLeaveHuman={mm.leaveHumanMatch}
+        onRematchHuman={mm.rematchHuman}
+        onSendChat={mm.sendChat}
+        showDuelBar
+      />
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="space-y-4 lg:col-span-8">
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/[0.08] bg-[#0E1324] p-4">
-            <div className="flex flex-wrap gap-1.5">
+          {!isHumanDuel && (
+            <div className="flex flex-wrap items-center gap-1.5 rounded-2xl border border-white/[0.08] bg-[#0E1324] p-3">
               {(['All', 'Gaming & Tech', 'Science', 'World Geography', 'History', 'Logic & Numbers'] as const).map(
                 (topic) => (
                   <button
@@ -208,26 +274,7 @@ export function TriviaChallengeGame({
                 )
               )}
             </div>
-            <div className="flex gap-1.5">
-              {(['easy', 'medium', 'hard'] as DifficultyLevel[]).map((d) => (
-                <button
-                  key={d}
-                  type="button"
-                  onClick={() => {
-                    setDifficulty(d);
-                    startBlitz(topicFilter);
-                  }}
-                  className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold capitalize cursor-pointer ${
-                    difficulty === d
-                      ? 'border-[#38BDF8] bg-[#38BDF8]/20 text-white'
-                      : 'border-slate-700 bg-[#060811] text-slate-400'
-                  }`}
-                >
-                  {d}
-                </button>
-              ))}
-            </div>
-          </div>
+          )}
 
           <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-6 space-y-5">
             {!finished ? (
@@ -236,11 +283,11 @@ export function TriviaChallengeGame({
                   <span className="font-mono text-[#38BDF8]">
                     Question {qIndex + 1} / {deck.length} · {q.topic}
                   </span>
-                  <span className="inline-flex items-center gap-1 font-mono font-bold text-white">
+                  <span className="inline-flex items-center gap-1 font-mono font-bold text-white tabular-nums">
                     <Clock className="h-3.5 w-3.5 text-[#F97316]" /> {timeLeft}s
                   </span>
-                  <span className="font-mono text-slate-200">
-                    You {playerScore} — {aiScore} AI
+                  <span className="font-mono text-slate-200 tabular-nums">
+                    {isHumanDuel ? `Score: ${playerScore}` : `You ${playerScore} — ${aiScore} AI`}
                   </span>
                 </div>
 
@@ -255,7 +302,7 @@ export function TriviaChallengeGame({
                       <button
                         key={idx}
                         type="button"
-                        disabled={isHidden || selectedOpt !== null}
+                        disabled={isHidden || selectedOpt !== null || mm.matchPhase === 'searching'}
                         onClick={() => handleAnswer(idx)}
                         className={`flex items-center justify-between gap-2 rounded-xl border p-4 text-left text-sm font-medium transition cursor-pointer ${
                           isHidden
@@ -283,7 +330,7 @@ export function TriviaChallengeGame({
                 <div className="flex items-center justify-between pt-2">
                   <button
                     type="button"
-                    disabled={lifelinesLeft <= 0 || selectedOpt !== null || hiddenOpts.length > 0}
+                    disabled={lifelinesLeft <= 0 || selectedOpt !== null || hiddenOpts.length > 0 || mm.matchPhase === 'searching'}
                     onClick={useFiftyFifty}
                     className="inline-flex items-center gap-1.5 rounded-xl border border-[#F97316]/40 bg-[#F97316]/10 px-3.5 py-2 text-xs font-semibold text-[#FDBA74] disabled:opacity-40 cursor-pointer"
                   >
@@ -296,14 +343,17 @@ export function TriviaChallengeGame({
               <div className="space-y-4 py-4 text-center">
                 <Trophy className="mx-auto h-10 w-10 text-[#F97316]" />
                 <h2 className="font-display text-2xl font-bold text-white">
-                  {playerScore > aiScore
+                  {isHumanDuel
+                    ? mm.liveMatch?.winnerSummary || 'Trivia Blitz Finished!'
+                    : playerScore > aiScore
                     ? 'Trivia Blitz Victory!'
                     : playerScore === aiScore
                     ? 'Tie Match!'
                     : 'Quizmaster AI Wins'}
                 </h2>
                 <p className="text-sm text-slate-300">
-                  Correct Answers: {correctCount}/10 · Score: {playerScore} vs {aiScore} AI
+                  Correct Answers: {correctCount}/10 · Score: {playerScore}
+                  {!isHumanDuel ? ` vs ${aiScore} AI` : ''}
                 </p>
                 {rewardBanner && (
                   <p className="font-mono text-xs text-[#38BDF8]">
@@ -343,10 +393,10 @@ export function TriviaChallengeGame({
                 {triviaHistory.slice(0, 6).map((m) => (
                   <div
                     key={m.id}
-                    className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-[#060811] px-3 py-2 text-xs"
+                    className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-[#060811] px-3 py-2 text-xs"
                   >
                     <span className="text-slate-200 truncate">{m.summary}</span>
-                    <span className="font-mono text-[#8B5CF6]">+{m.scoreDelta}</span>
+                    <span className="font-mono text-[#8B5CF6] shrink-0">+{m.scoreDelta}</span>
                   </div>
                 ))}
               </div>

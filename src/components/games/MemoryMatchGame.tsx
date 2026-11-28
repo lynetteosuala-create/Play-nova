@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react';
-import { ArrowLeft, Cpu, RotateCcw, Sparkles, Trophy, User } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { ArrowLeft, RotateCcw, Sparkles, Trophy } from 'lucide-react';
 import { GAME_CATALOG } from '../../game/catalog.ts';
-import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
 import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
+import { useUniversalMatchmaking } from '../../hooks/useUniversalMatchmaking.ts';
+import type { MatchRecord, PlayerProfile } from '../../types.ts';
+import { createSeededRng, seededShuffle } from '../../utils/seededRandom.ts';
 import { soundFx } from '../../utils/sound.ts';
+import { UniversalMatchBar } from '../UniversalMatchBar.tsx';
 
 const CARD_SYMBOLS = [
   '⚡', '💎', '🚀', '👑', '🔥', '🛡️', '🎯', '🪐', '🔮', '⚔️',
@@ -24,13 +27,9 @@ interface MemoryMatchGameProps {
   onBack: () => void;
 }
 
-function buildDeck(pairCount: number): CardTile[] {
+function buildDeck(pairCount: number, seed: number): CardTile[] {
   const chosen = CARD_SYMBOLS.slice(0, pairCount);
-  const raw = [...chosen, ...chosen];
-  for (let i = raw.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [raw[i], raw[j]] = [raw[j], raw[i]];
-  }
+  const raw = seededShuffle([...chosen, ...chosen], seed);
   return raw.map((symbol, idx) => ({ id: idx, symbol, matched: false }));
 }
 
@@ -41,10 +40,10 @@ export function MemoryMatchGame({
   onBack,
 }: MemoryMatchGameProps) {
   const catalog = GAME_CATALOG.find((g) => g.id === 'memory_match')!;
-  const [mode, setMode] = useState<'vs_ai' | 'solo'>('vs_ai');
-  const [difficulty, setDifficulty] = useState<DifficultyLevel>('medium');
+  const mm = useUniversalMatchmaking('memory_match', { player });
+
   const [gridPairs, setGridPairs] = useState<8 | 12 | 18>(8);
-  const [cards, setCards] = useState<CardTile[]>(() => buildDeck(8));
+  const [cards, setCards] = useState<CardTile[]>(() => buildDeck(8, mm.seed));
   const [flipped, setFlipped] = useState<number[]>([]);
   const [seenMemory, setSeenMemory] = useState<Record<number, string>>({});
   const [turn, setTurn] = useState<'player' | 'ai'>('player');
@@ -60,31 +59,68 @@ export function MemoryMatchGame({
   const [startedAt, setStartedAt] = useState(Date.now());
 
   const memoryHistory = recentMatches.filter((m) => m.gameId === 'memory_match');
+  const isHumanDuel = mm.matchPhase === 'human';
 
-  const startNewGame = (pairs = gridPairs, nextMode = mode) => {
+  const resetBoard = useCallback(
+    (pairs: 8 | 12 | 18, seedVal: number) => {
+      setCards(buildDeck(pairs, seedVal));
+      setFlipped([]);
+      setSeenMemory({});
+      setTurn('player');
+      setPlayerPairs(0);
+      setAiPairs(0);
+      setMoves(0);
+      setStreak(0);
+      setBusy(false);
+      setFinished(null);
+      setRewardBanner(null);
+      setStartedAt(Date.now());
+    },
+    []
+  );
+
+  useEffect(() => {
+    resetBoard(gridPairs, mm.seed);
+  }, [mm.seed, mm.matchPhase, gridPairs, resetBoard]);
+
+  const startNewGame = (pairs = gridPairs) => {
     soundFx.playClick();
-    setCards(buildDeck(pairs));
-    setFlipped([]);
-    setSeenMemory({});
-    setTurn('player');
-    setPlayerPairs(0);
-    setAiPairs(0);
-    setMoves(0);
-    setStreak(0);
-    setBusy(false);
-    setFinished(null);
-    setRewardBanner(null);
-    setStartedAt(Date.now());
-    setMode(nextMode);
+    setGridPairs(pairs);
+    if (isHumanDuel) {
+      mm.rematchHuman();
+    } else {
+      const nextSeed = mm.rotateLocalSeed();
+      resetBoard(pairs, nextSeed);
+    }
   };
 
   const completeMatch = async (pScore: number, aScore: number, totalMoves: number) => {
+    const scoreDelta = Math.max(
+      60,
+      gridPairs * 14 + pScore * 8 - Math.max(0, totalMoves - gridPairs * 2)
+    );
+
+    if (isHumanDuel) {
+      soundFx.playWin();
+      const summary = `${pScore}/${gridPairs} pairs in ${totalMoves} flips`;
+      setFinished({
+        outcome: 'win',
+        text: mm.liveMatch?.winnerSummary || `Cleared ${gridPairs} pairs in ${totalMoves} flips!`,
+      });
+      mm.sendDuelProgress({
+        score: scoreDelta,
+        progress: pScore,
+        maxProgress: gridPairs,
+        finished: true,
+        summary,
+      });
+      return;
+    }
+
     const outcome: 'win' | 'loss' | 'draw' =
-      mode === 'solo' ? 'win' : pScore > aScore ? 'win' : pScore < aScore ? 'loss' : 'draw';
+      pScore > aScore ? 'win' : pScore < aScore ? 'loss' : 'draw';
     const text =
-      mode === 'solo'
-        ? `Cleared all ${gridPairs} pairs in ${totalMoves} flips!`
-        : pScore > aScore
+      pScore > aScore
         ? `Victory! ${pScore}–${aScore} pairs against Memory AI`
         : pScore === aScore
         ? `Draw! ${pScore}–${aScore} pairs split`
@@ -96,17 +132,17 @@ export function MemoryMatchGame({
 
     setFinished({ outcome, text });
 
-    const scoreDelta =
-      outcome === 'win' ? Math.max(70, gridPairs * 14 + pScore * 8 - Math.max(0, totalMoves - gridPairs * 2)) : outcome === 'draw' ? 45 : 15;
+    const finalScoreDelta =
+      outcome === 'win' ? scoreDelta : outcome === 'draw' ? 45 : 15;
 
     try {
       const res = await completeSinglePlayerGame(player, {
         gameId: 'memory_match',
-        mode,
-        difficulty,
+        mode: 'vs_ai',
+        difficulty: mm.difficulty,
         outcome,
-        opponentLabel: mode === 'solo' ? `Solo ${gridPairs}-Pair Run` : `Memory AI (${difficulty})`,
-        scoreDelta,
+        opponentLabel: `Memory AI (${mm.difficulty})`,
+        scoreDelta: finalScoreDelta,
         durationSec: Math.max(5, Math.round((Date.now() - startedAt) / 1000)),
         summary: text,
       });
@@ -117,10 +153,11 @@ export function MemoryMatchGame({
     }
   };
 
-  // AI Turn Execution
+  // AI Turn Execution (only when playing vs AI)
   useEffect(() => {
-    if (mode !== 'vs_ai' || turn !== 'ai' || finished || busy) return;
+    if (mm.matchPhase !== 'ai' || turn !== 'ai' || finished || busy) return;
     setBusy(true);
+    const rng = createSeededRng(mm.seed + moves * 31 + aiPairs * 17);
     const timer = window.setTimeout(() => {
       const unmatched = cards.filter((c) => !c.matched);
       if (unmatched.length < 2) {
@@ -128,12 +165,11 @@ export function MemoryMatchGame({
         return;
       }
 
-      // Check AI memory for known matching pairs
-      const recallChance = difficulty === 'hard' ? 0.85 : difficulty === 'medium' ? 0.55 : 0.2;
+      const recallChance = mm.difficulty === 'hard' ? 0.85 : mm.difficulty === 'medium' ? 0.55 : 0.2;
       let pick1: number | null = null;
       let pick2: number | null = null;
 
-      if (Math.random() < recallChance) {
+      if (rng() < recallChance) {
         const bySym = new Map<string, number[]>();
         for (const c of unmatched) {
           if (seenMemory[c.id]) {
@@ -152,10 +188,10 @@ export function MemoryMatchGame({
       }
 
       if (pick1 === null || pick2 === null) {
-        const shuffled = [...unmatched].sort(() => Math.random() - 0.5);
+        const shuffled = seededShuffle(unmatched, mm.seed + moves + 99);
         pick1 = shuffled[0].id;
         const knownMatch =
-          Math.random() < recallChance
+          rng() < recallChance
             ? unmatched.find((c) => c.id !== pick1 && seenMemory[c.id] === shuffled[0].symbol)
             : undefined;
         pick2 = knownMatch ? knownMatch.id : shuffled[1].id;
@@ -183,7 +219,6 @@ export function MemoryMatchGame({
           if (nextCards.every((c) => c.matched)) {
             void completeMatch(playerPairs, nextAiScore, moves);
           } else {
-            // AI keeps turn on match, or passes after brief pause
             setTurn('ai');
           }
         } else {
@@ -196,10 +231,10 @@ export function MemoryMatchGame({
 
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turn, mode, finished, busy, aiPairs]);
+  }, [turn, mm.matchPhase, finished, busy, aiPairs]);
 
   const handleFlip = (cardId: number) => {
-    if (busy || finished || (mode === 'vs_ai' && turn !== 'player')) return;
+    if (mm.matchPhase === 'searching' || busy || finished || (!isHumanDuel && turn !== 'player')) return;
     if (flipped.includes(cardId) || cards[cardId].matched) return;
 
     soundFx.playClick();
@@ -225,6 +260,18 @@ export function MemoryMatchGame({
         setStreak((s) => s + 1);
         setFlipped([]);
         setBusy(false);
+
+        if (isHumanDuel) {
+          const liveScore = nextPlayerPairs * 25 + Math.max(0, 20 - nextMoves);
+          mm.sendDuelProgress({
+            score: liveScore,
+            progress: nextPlayerPairs,
+            maxProgress: gridPairs,
+            finished: false,
+            summary: `${nextPlayerPairs}/${gridPairs} pairs`,
+          });
+        }
+
         if (nextCards.every((c) => c.matched)) {
           void completeMatch(nextPlayerPairs, aiPairs, nextMoves);
         }
@@ -232,9 +279,9 @@ export function MemoryMatchGame({
         setStreak(0);
         setFlipped([]);
         setBusy(false);
-        if (mode === 'vs_ai') setTurn('ai');
+        if (!isHumanDuel) setTurn('ai');
       }
-    }, 580);
+    }, 560);
   };
 
   return (
@@ -246,7 +293,7 @@ export function MemoryMatchGame({
             onClick={onBack}
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white cursor-pointer"
           >
-            <ArrowLeft className="h-3.5 w-3.5" /> Back to Hub
+            <ArrowLeft className="h-3.5 w-3.5" /> Back to Games
           </button>
           <h1 className="mt-1 font-display text-2xl font-bold text-white sm:text-3xl">Memory Match</h1>
         </div>
@@ -256,98 +303,66 @@ export function MemoryMatchGame({
         </div>
       </div>
 
+      <UniversalMatchBar
+        matchPhase={mm.matchPhase}
+        secondsLeft={mm.secondsLeft}
+        difficulty={mm.difficulty}
+        onChangeDifficulty={mm.setDifficulty}
+        liveMatch={mm.liveMatch}
+        mySeat={mm.mySeat}
+        opponentSeat={mm.opponentSeat}
+        onlineCount={mm.onlineCount}
+        onSkipToAi={mm.skipToAi}
+        onSearchHuman={mm.searchForHuman}
+        onLeaveHuman={mm.leaveHumanMatch}
+        onRematchHuman={mm.rematchHuman}
+        onSendChat={mm.sendChat}
+        showDuelBar
+        extraControls={
+          <div className="flex items-center gap-1.5">
+            {([8, 12, 18] as const).map((p) => (
+              <button
+                key={p}
+                type="button"
+                disabled={isHumanDuel}
+                onClick={() => startNewGame(p)}
+                className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold cursor-pointer disabled:opacity-50 ${
+                  gridPairs === p
+                    ? 'border-[#38BDF8] bg-[#38BDF8]/20 text-white'
+                    : 'border-slate-700 bg-[#060811] text-slate-400'
+                }`}
+              >
+                {p === 8 ? '4×4' : p === 12 ? '6×4' : '6×6'}
+              </button>
+            ))}
+            {mm.matchPhase === 'ai' && (
+              <button
+                type="button"
+                onClick={() => startNewGame(gridPairs)}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-[#060811] px-2.5 py-1.5 text-xs font-semibold text-slate-200 hover:text-white cursor-pointer"
+              >
+                <RotateCcw className="h-3.5 w-3.5" /> Shuffle
+              </button>
+            )}
+          </div>
+        }
+      />
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="space-y-4 lg:col-span-8">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/[0.08] bg-[#0E1324] p-4">
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => startNewGame(gridPairs, 'vs_ai')}
-                className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold cursor-pointer ${
-                  mode === 'vs_ai'
-                    ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white'
-                    : 'border-slate-700 bg-[#060811] text-slate-300'
-                }`}
-              >
-                <Cpu className="h-3.5 w-3.5" /> vs Memory AI
-              </button>
-              <button
-                type="button"
-                onClick={() => startNewGame(gridPairs, 'solo')}
-                className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold cursor-pointer ${
-                  mode === 'solo'
-                    ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white'
-                    : 'border-slate-700 bg-[#060811] text-slate-300'
-                }`}
-              >
-                <User className="h-3.5 w-3.5" /> Solo Efficiency
-              </button>
-            </div>
-
-            <div className="flex gap-1.5">
-              {([8, 12, 18] as const).map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => {
-                    setGridPairs(p);
-                    startNewGame(p, mode);
-                  }}
-                  className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold cursor-pointer ${
-                    gridPairs === p
-                      ? 'border-[#38BDF8] bg-[#38BDF8]/20 text-white'
-                      : 'border-slate-700 bg-[#060811] text-slate-400'
-                  }`}
-                >
-                  {p === 8 ? '4×4' : p === 12 ? '6×4' : '6×6'}
-                </button>
-              ))}
-            </div>
-
-            {mode === 'vs_ai' && (
-              <div className="flex gap-1.5">
-                {(['easy', 'medium', 'hard'] as DifficultyLevel[]).map((d) => (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => {
-                      setDifficulty(d);
-                      startNewGame(gridPairs, mode);
-                    }}
-                    className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold capitalize cursor-pointer ${
-                      difficulty === d
-                        ? 'border-[#F97316] bg-[#F97316]/20 text-[#FDBA74]'
-                        : 'border-slate-700 bg-[#060811] text-slate-400'
-                    }`}
-                  >
-                    {d}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <button
-              type="button"
-              onClick={() => startNewGame(gridPairs, mode)}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#060811] px-3 py-1.5 text-xs font-semibold text-slate-200 hover:text-white cursor-pointer"
-            >
-              <RotateCcw className="h-3.5 w-3.5" /> Shuffle Deck
-            </button>
-          </div>
-
           <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-5 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <span className="font-semibold text-white">
                 {finished
                   ? finished.text
-                  : mode === 'vs_ai'
-                  ? turn === 'player'
-                    ? 'Your Turn — Flip 2 matching emblems'
-                    : 'Memory AI Bot Turn...'
-                  : 'Flip all matching pairs in minimum turns'}
+                  : isHumanDuel
+                  ? 'Synced Seed 1v1 — Clear all matching pairs faster & in fewer flips!'
+                  : turn === 'player'
+                  ? 'Your Turn — Flip 2 matching emblems'
+                  : 'Memory AI Bot Turn...'}
               </span>
               <span className="font-mono text-slate-300 tabular-nums">
-                You: {playerPairs} {mode === 'vs_ai' ? `· AI: ${aiPairs}` : ''} · Flips: {moves} · Streak: {streak}
+                You: {playerPairs}/{gridPairs} {!isHumanDuel ? `· AI: ${aiPairs}` : ''} · Flips: {moves} · Streak: {streak}
               </span>
             </div>
 
@@ -362,7 +377,7 @@ export function MemoryMatchGame({
                   <button
                     key={card.id}
                     type="button"
-                    disabled={isOpen || busy || Boolean(finished)}
+                    disabled={isOpen || busy || Boolean(finished) || mm.matchPhase === 'searching'}
                     onClick={() => handleFlip(card.id)}
                     className={`aspect-square rounded-xl border text-2xl sm:text-3xl transition flex items-center justify-center cursor-pointer ${
                       card.matched
@@ -384,7 +399,8 @@ export function MemoryMatchGame({
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#8B5CF6]/40 bg-[#060811] px-4 py-3">
                 <div>
                   <p className="font-display text-base font-bold text-white flex items-center gap-2">
-                    <Trophy className="h-4 w-4 text-[#F97316]" /> {finished.text}
+                    <Trophy className="h-4 w-4 text-[#F97316]" />{' '}
+                    {isHumanDuel ? mm.liveMatch?.winnerSummary || finished.text : finished.text}
                   </p>
                   {rewardBanner && (
                     <p className="font-mono text-xs text-slate-300">
@@ -394,7 +410,7 @@ export function MemoryMatchGame({
                 </div>
                 <button
                   type="button"
-                  onClick={() => startNewGame(gridPairs, mode)}
+                  onClick={() => startNewGame(gridPairs)}
                   className="rounded-xl bg-[#8B5CF6] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
                 >
                   Play Again
@@ -423,10 +439,10 @@ export function MemoryMatchGame({
                 {memoryHistory.slice(0, 6).map((m) => (
                   <div
                     key={m.id}
-                    className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-[#060811] px-3 py-2 text-xs"
+                    className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-[#060811] px-3 py-2 text-xs"
                   >
                     <span className="text-slate-200 truncate">{m.summary}</span>
-                    <span className="font-mono text-[#38BDF8]">+{m.scoreDelta}</span>
+                    <span className="font-mono text-[#38BDF8] shrink-0">+{m.scoreDelta}</span>
                   </div>
                 ))}
               </div>

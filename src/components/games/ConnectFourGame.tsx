@@ -11,9 +11,12 @@ import {
   getC4DropRow,
   type C4Cell,
 } from '../../game/connectFour.ts';
-import type { DifficultyLevel, MatchRecord, PlayerProfile } from '../../types.ts';
 import { completeSinglePlayerGame } from '../../game/localArcadeEngine.ts';
+import { useUniversalMatchmaking } from '../../hooks/useUniversalMatchmaking.ts';
+import type { MatchRecord, PlayerProfile } from '../../types.ts';
 import { soundFx } from '../../utils/sound.ts';
+import { wsClient } from '../../utils/wsClient.ts';
+import { UniversalMatchBar } from '../UniversalMatchBar.tsx';
 
 function dropC4Disc(board: C4Cell[], col: number, mark: 'R' | 'Y'): { board: C4Cell[]; row: number } | null {
   const row = getC4DropRow(board, col);
@@ -27,7 +30,6 @@ interface ConnectFourGameProps {
   player: PlayerProfile;
   recentMatches: MatchRecord[];
   onProgressUpdated: (player: PlayerProfile, newlyUnlocked?: string[], completedChallenges?: string[]) => void;
-  onOpenMultiplayer?: () => void;
   onBack: () => void;
 }
 
@@ -35,12 +37,12 @@ export function ConnectFourGame({
   player,
   recentMatches,
   onProgressUpdated,
-  onOpenMultiplayer,
   onBack,
 }: ConnectFourGameProps) {
   const catalog = GAME_CATALOG.find((g) => g.id === 'connect_four')!;
+  const mm = useUniversalMatchmaking('connect_four', { player });
+
   const [mode, setMode] = useState<'vs_ai' | 'local_2p'>('vs_ai');
-  const [difficulty, setDifficulty] = useState<DifficultyLevel>('medium');
   const [board, setBoard] = useState<C4Cell[]>(() => createC4Board());
   const [turn, setTurn] = useState<'R' | 'Y'>('R');
   const [winLine, setWinLine] = useState<number[] | null>(null);
@@ -52,6 +54,15 @@ export function ConnectFourGame({
   const [aiThinking, setAiThinking] = useState(false);
   const [startedAt, setStartedAt] = useState<number>(Date.now());
   const [sessionScore, setSessionScore] = useState({ wins: 0, draws: 0, losses: 0 });
+
+  const isHuman = mm.matchPhase === 'human' && Boolean(mm.liveMatch?.connectFourState);
+  const c4Server = isHuman ? mm.liveMatch!.connectFourState! : null;
+  const myTeam: 'R' | 'Y' = isHuman ? (mm.mySeatIndex === 0 ? 'R' : 'Y') : 'R';
+
+  const activeBoard = c4Server ? c4Server.board : board;
+  const activeTurn = c4Server ? c4Server.currentTeam : turn;
+  const activeWinLine = c4Server ? c4Server.winLine : winLine;
+  const isFinished = c4Server ? Boolean(c4Server.winnerTeam) : Boolean(outcomeText);
 
   const c4History = recentMatches.filter((m) => m.gameId === 'connect_four');
 
@@ -82,15 +93,25 @@ export function ConnectFourGame({
     );
 
     const scoreDelta =
-      outcome === 'win' ? (mode === 'local_2p' ? 50 : difficulty === 'hard' ? 160 : difficulty === 'medium' ? 120 : 90) : outcome === 'draw' ? 40 : 12;
+      outcome === 'win'
+        ? mode === 'local_2p'
+          ? 50
+          : mm.difficulty === 'hard'
+          ? 160
+          : mm.difficulty === 'medium'
+          ? 120
+          : 90
+        : outcome === 'draw'
+        ? 40
+        : 12;
 
     try {
       const res = await completeSinglePlayerGame(player, {
         gameId: 'connect_four',
         mode,
-        difficulty,
+        difficulty: mm.difficulty,
         outcome,
-        opponentLabel: mode === 'local_2p' ? 'Local Player 2' : `Connect 4 AI (${difficulty})`,
+        opponentLabel: mode === 'local_2p' ? 'Local Player 2' : `Connect 4 AI (${mm.difficulty})`,
         scoreDelta,
         durationSec: Math.max(4, Math.round((Date.now() - startedAt) / 1000)),
         summary:
@@ -108,10 +129,10 @@ export function ConnectFourGame({
   };
 
   useEffect(() => {
-    if (mode !== 'vs_ai' || turn !== 'Y' || outcomeText) return;
+    if (isHuman || mm.matchPhase !== 'ai' || mode !== 'vs_ai' || turn !== 'Y' || outcomeText) return;
     setAiThinking(true);
     const timer = window.setTimeout(() => {
-      const col = chooseC4AiMove(board, difficulty, 'Y');
+      const col = chooseC4AiMove(board, mm.difficulty, 'Y');
       setAiThinking(false);
       if (col < 0) return;
       const dropped = dropC4Disc(board, col, 'Y');
@@ -127,10 +148,17 @@ export function ConnectFourGame({
     }, 320);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turn, mode, outcomeText]);
+  }, [isHuman, mm.matchPhase, turn, mode, outcomeText]);
 
   const handleDrop = (col: number) => {
-    if (outcomeText || aiThinking) return;
+    if (mm.matchPhase === 'searching' || isFinished || aiThinking) return;
+    if (isHuman) {
+      if (activeTurn !== myTeam || activeBoard[col] !== null) return;
+      soundFx.playSelect();
+      wsClient.dropConnectFour(col);
+      return;
+    }
+
     if (mode === 'vs_ai' && turn !== 'R') return;
     const dropped = dropC4Disc(board, col, turn);
     if (!dropped) return;
@@ -159,7 +187,7 @@ export function ConnectFourGame({
   };
 
   const handleHint = () => {
-    if (outcomeText || aiThinking) return;
+    if (isFinished || aiThinking || isHuman) return;
     const suggested = chooseC4AiMove(board, 'hard', turn);
     if (suggested >= 0) {
       setHintCol(suggested);
@@ -176,43 +204,47 @@ export function ConnectFourGame({
             onClick={onBack}
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-white cursor-pointer"
           >
-            <ArrowLeft className="h-3.5 w-3.5" /> Back to Hub
+            <ArrowLeft className="h-3.5 w-3.5" /> Back to Games
           </button>
           <h1 className="mt-1 font-display text-2xl font-bold text-white sm:text-3xl">Connect Four</h1>
         </div>
         <div className="flex flex-wrap items-center gap-4 font-mono text-xs tabular-nums text-slate-300">
           <span>Wins: {player.stats.byGame.connect_four.wins}</span>
           <span>Points: {player.stats.byGame.connect_four.points}</span>
-          {onOpenMultiplayer && (
-            <button
-              type="button"
-              onClick={onOpenMultiplayer}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#38BDF8]/40 bg-[#38BDF8]/10 px-3 py-1.5 font-sans text-xs font-semibold text-[#38BDF8] hover:bg-[#38BDF8]/20 cursor-pointer"
-            >
-              <Users className="h-3.5 w-3.5" />
-              Online 1v1 Room
-            </button>
-          )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <div className="space-y-4 lg:col-span-7">
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/[0.08] bg-[#0E1324] p-4">
-            <div className="flex gap-2">
+      <UniversalMatchBar
+        matchPhase={mm.matchPhase}
+        secondsLeft={mm.secondsLeft}
+        difficulty={mm.difficulty}
+        onChangeDifficulty={(d) => {
+          mm.setDifficulty(d);
+          resetBoard();
+        }}
+        liveMatch={mm.liveMatch}
+        mySeat={mm.mySeat}
+        opponentSeat={mm.opponentSeat}
+        onlineCount={mm.onlineCount}
+        onSkipToAi={mm.skipToAi}
+        onSearchHuman={mm.searchForHuman}
+        onLeaveHuman={mm.leaveHumanMatch}
+        onRematchHuman={mm.rematchHuman}
+        onSendChat={mm.sendChat}
+        extraControls={
+          !isHuman ? (
+            <div className="flex items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => {
                   setMode('vs_ai');
                   resetBoard();
                 }}
-                className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold cursor-pointer ${
-                  mode === 'vs_ai'
-                    ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white'
-                    : 'border-slate-700 bg-[#060811] text-slate-300'
+                className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-semibold cursor-pointer ${
+                  mode === 'vs_ai' ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white' : 'border-white/[0.08] bg-[#060811] text-slate-400'
                 }`}
               >
-                <Cpu className="h-3.5 w-3.5" /> Solo vs AI
+                <Cpu className="h-3.5 w-3.5" /> AI
               </button>
               <button
                 type="button"
@@ -220,85 +252,62 @@ export function ConnectFourGame({
                   setMode('local_2p');
                   resetBoard();
                 }}
-                className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold cursor-pointer ${
-                  mode === 'local_2p'
-                    ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white'
-                    : 'border-slate-700 bg-[#060811] text-slate-300'
+                className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-semibold cursor-pointer ${
+                  mode === 'local_2p' ? 'border-[#8B5CF6] bg-[#8B5CF6]/20 text-white' : 'border-white/[0.08] bg-[#060811] text-slate-400'
                 }`}
               >
-                <Users className="h-3.5 w-3.5" /> Local 2P
-              </button>
-            </div>
-
-            {mode === 'vs_ai' && (
-              <div className="flex gap-1.5">
-                {(['easy', 'medium', 'hard'] as DifficultyLevel[]).map((d) => (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => {
-                      setDifficulty(d);
-                      resetBoard();
-                    }}
-                    className={`rounded-lg border px-2.5 py-1.5 text-xs font-semibold capitalize cursor-pointer ${
-                      difficulty === d
-                        ? 'border-[#38BDF8] bg-[#38BDF8]/20 text-white'
-                        : 'border-slate-700 bg-[#060811] text-slate-400'
-                    }`}
-                  >
-                    {d}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={handleHint}
-                disabled={Boolean(outcomeText) || aiThinking}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[#F97316]/40 bg-[#F97316]/10 px-3 py-1.5 text-xs font-semibold text-[#FDBA74] hover:bg-[#F97316]/20 disabled:opacity-40 cursor-pointer"
-              >
-                <Lightbulb className="h-3.5 w-3.5" /> Hint
+                <Users className="h-3.5 w-3.5" /> 2P
               </button>
               <button
                 type="button"
                 onClick={resetBoard}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#060811] px-3 py-1.5 text-xs font-semibold text-slate-200 hover:text-white cursor-pointer"
+                className="inline-flex items-center gap-1 rounded-xl border border-white/[0.1] bg-[#060811] px-2.5 py-1.5 text-xs font-semibold text-slate-200 hover:text-white cursor-pointer"
               >
-                <RotateCcw className="h-3.5 w-3.5" /> Restart
+                <RotateCcw className="h-3.5 w-3.5" /> Reset
               </button>
             </div>
-          </div>
+          ) : undefined
+        }
+      />
 
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        <div className="space-y-4 lg:col-span-7">
           <div className="rounded-2xl border border-white/[0.08] bg-[#0E1324] p-5">
-            <div className="mb-3 flex items-center justify-between text-xs">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs">
               <span className="font-medium text-slate-300">
-                {outcomeText
-                  ? outcomeText
+                {isFinished
+                  ? mm.liveMatch?.winnerSummary || outcomeText
                   : aiThinking
                   ? 'AI Bot is calculating depth search...'
-                  : turn === 'R'
+                  : activeTurn === myTeam
                   ? mode === 'local_2p'
                     ? 'Player 1 Turn (Neon Blue)'
                     : 'Your Turn (Neon Blue)'
                   : mode === 'local_2p'
                   ? 'Player 2 Turn (Solar Orange)'
+                  : isHuman
+                  ? `${mm.opponentSeat?.username || 'Opponent'} Turn`
                   : 'AI Bot Turn (Solar Orange)'}
               </span>
-              {hintCol !== null && !outcomeText && (
-                <span className="font-mono text-[#F97316]">AI Hint: Drop Column {hintCol + 1}</span>
+              {!isHuman && !isFinished && (
+                <button
+                  type="button"
+                  onClick={handleHint}
+                  disabled={aiThinking}
+                  className="inline-flex items-center gap-1 text-[#FDBA74] hover:underline cursor-pointer"
+                >
+                  <Lightbulb className="h-3.5 w-3.5" /> {hintCol !== null ? `Drop Col ${hintCol + 1}` : 'Hint'}
+                </button>
               )}
             </div>
 
-            {/* 7x6 Interactive Board */}
             <div className="mx-auto max-w-md rounded-2xl border border-[#8B5CF6]/30 bg-[#060811] p-3">
               <div className="mb-2 grid grid-cols-7 gap-2">
                 {Array.from({ length: C4_COLS }, (_, col) => (
                   <button
                     key={col}
                     type="button"
-                    disabled={Boolean(outcomeText) || aiThinking || board[col] !== null}
+                    disabled={isFinished || aiThinking || activeBoard[col] !== null || (isHuman && activeTurn !== myTeam)}
                     onClick={() => handleDrop(col)}
                     className={`rounded-lg py-1 font-mono text-[11px] font-bold transition cursor-pointer ${
                       hintCol === col
@@ -313,15 +322,15 @@ export function ConnectFourGame({
 
               <div className="grid grid-cols-7 gap-2">
                 {Array.from({ length: C4_ROWS * C4_COLS }, (_, idx) => {
-                  const val = board[idx];
+                  const val = activeBoard[idx];
                   const col = idx % C4_COLS;
-                  const isWin = winLine?.includes(idx) ?? false;
+                  const isWin = activeWinLine?.includes(idx) ?? false;
                   return (
                     <button
                       key={idx}
                       type="button"
                       onClick={() => handleDrop(col)}
-                      disabled={Boolean(outcomeText) || aiThinking || board[col] !== null}
+                      disabled={isFinished || aiThinking || activeBoard[col] !== null || (isHuman && activeTurn !== myTeam)}
                       aria-label={`Row ${Math.floor(idx / C4_COLS) + 1} Column ${col + 1}`}
                       className={`aspect-square rounded-full border transition flex items-center justify-center cursor-pointer ${
                         isWin
@@ -348,12 +357,12 @@ export function ConnectFourGame({
               </div>
             </div>
 
-            {outcomeText && (
+            {isFinished && (
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#8B5CF6]/40 bg-[#060811] px-4 py-3">
                 <div>
                   <p className="font-display text-base font-bold text-white flex items-center gap-2">
                     <Trophy className="h-4 w-4 text-[#F97316]" />
-                    {outcomeText}
+                    {mm.liveMatch?.winnerSummary || outcomeText}
                   </p>
                   {rewardBanner && (
                     <p className="font-mono text-xs text-slate-300 mt-0.5">
@@ -363,7 +372,7 @@ export function ConnectFourGame({
                 </div>
                 <button
                   type="button"
-                  onClick={resetBoard}
+                  onClick={isHuman ? mm.rematchHuman : resetBoard}
                   className="rounded-xl bg-[#8B5CF6] px-4 py-2 text-xs font-semibold text-white hover:bg-[#7C3AED] cursor-pointer"
                 >
                   Play Again
